@@ -1,0 +1,28 @@
+---
+source: tests/tests.rs
+expression: state
+---
+{
+  "chat": [
+    {
+      "kind": "Empty",
+      "from": "",
+      "text": "#TF_timeleft",
+      "tick": 4
+    }
+  ],
+  "users": {
+    "2": {
+      "classes": {},
+      "name": "Icewind | demos.tf",
+      "userId": 2,
+      "steamId": "[U:1:64229260]",
+      "team": "other"
+    }
+  },
+  "deaths": [],
+  "rounds": [],
+  "startTick": 68,
+  "intervalPerTick": 0.015,
+  "pauses": []
+}

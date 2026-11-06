@@ -1,0 +1,41 @@
+name: Release
+
+on:
+  release:
+    types: [created]
+
+permissions:
+  contents: write
+
+jobs:
+  matrix:
+    runs-on: nix
+    outputs:
+      cross-matrix: ${{ steps.set-matrix.outputs.cross-matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: set-matrix
+        run: |
+          echo "cross-matrix={\"include\":$(nix eval --json '.#lib.crossMatrix')}" | tee -a $GITHUB_OUTPUT
+
+  build:
+    runs-on: nix
+    needs: [matrix]
+    strategy:
+      fail-fast: false
+      matrix: ${{fromJson(needs.matrix.outputs.cross-matrix)}}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: https://codeberg.org/icewind/attic-action@v1
+        with:
+          name: link
+          instance: https://cache.icewind.link
+          authToken: "${{ secrets.ATTIC_TOKEN }}"
+      - run: nix build .#${{ matrix.target }}
+      - name: Upload binary to release
+        uses: https://github.com/svenstaro/upload-release-action@v2
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: result/bin/parse_demo${{ matrix.binary-suffix }}
+          asset_name: parser-${{ matrix.target }}${{ matrix.binary-suffix }}
+          tag: ${{ github.ref }}

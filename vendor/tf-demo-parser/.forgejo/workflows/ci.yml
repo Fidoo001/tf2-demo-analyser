@@ -1,0 +1,46 @@
+name: "CI"
+on:
+  pull_request:
+  push:
+
+jobs:
+  checks:
+    runs-on: nix
+    steps:
+      - uses: actions/checkout@v4
+      - uses: https://codeberg.org/icewind/attic-action@v1
+        with:
+          name: link
+          instance: https://cache.icewind.link
+          authToken: "${{ secrets.ATTIC_TOKEN }}"
+      - run: nix flake check --keep-going
+
+  semver:
+    runs-on: nix
+    needs: checks
+    steps:
+      - uses: actions/checkout@v4
+      - uses: https://codeberg.org/icewind/attic-action@v1
+        with:
+          name: link
+          instance: https://cache.icewind.link
+          authToken: "${{ secrets.ATTIC_TOKEN }}"
+      - run: nix run .#semver-checks
+
+  check-schema:
+    runs-on: nix
+    needs: checks
+    steps:
+      - uses: actions/checkout@v4
+      - uses: https://codeberg.org/icewind/attic-action@v1
+        with:
+          name: link
+          instance: https://cache.icewind.link
+          authToken: "${{ secrets.ATTIC_TOKEN }}"
+      - name: Generate schema
+        run: |
+          nix run .#demostf-parser-schema > schema.json
+          nix fmt
+      - run: |
+          git diff
+          git diff-index --quiet HEAD --
