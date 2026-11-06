@@ -54,3 +54,5 @@ To build the GUI with all features:
 To build the CLI:
 
 `cargo build --release --bin cli --features "parallel"`
+
+PS: This program was vibecoded for the most part. If something doesn't work, blame Gemini 3.8 Flash :)
