@@ -1,0 +1,16 @@
+# Build output
+/target/
+/latest/
+
+# Runtime / local files
+params.json
+*.dem
+*.log
+*.exe
+*.zip
+
+# Editor / OS
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store

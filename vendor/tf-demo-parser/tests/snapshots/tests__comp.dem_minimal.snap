@@ -1,0 +1,2232 @@
+---
+source: tests/tests.rs
+expression: state
+---
+{
+  "chat": [
+    {
+      "kind": "Empty",
+      "from": "",
+      "text": "[demos.tf]: Demo recording completed",
+      "tick": 0
+    },
+    {
+      "kind": "TF_Chat_All",
+      "from": "frying pan",
+      "text": "gamers assembly",
+      "tick": 16
+    },
+    {
+      "kind": "Empty",
+      "from": "",
+      "text": "[demos.tf]: Uploading demo auto-20181103-2046-pl_upward.dem",
+      "tick": 204
+    },
+    {
+      "kind": "Empty",
+      "from": "",
+      "text": "[demos.tf]: Demos must be at least 5 minutes long",
+      "tick": 2638
+    },
+    {
+      "kind": "TF_Chat_All",
+      "from": "Sian",
+      "text": "thanks @demos.tf",
+      "tick": 3284
+    },
+    {
+      "kind": "Empty",
+      "from": "",
+      "text": "[STV Stats] RED lost their uber advantage (39 seconds)",
+      "tick": 4376
+    },
+    {
+      "kind": "Empty",
+      "from": "",
+      "text": "[STV Stats] BLU had uber for 48 seconds before using it",
+      "tick": 12508
+    },
+    {
+      "kind": "TF_Chat_AllDead",
+      "from": "frying pan",
+      "text": ":(",
+      "tick": 20640
+    },
+    {
+      "kind": "Empty",
+      "from": "",
+      "text": "[STV Stats] BLU spent 16.6 seconds after spawning before healing",
+      "tick": 23676
+    },
+    {
+      "kind": "Empty",
+      "from": "",
+      "text": "[STV Stats] RED lost their uber advantage (11 seconds)",
+      "tick": 27124
+    },
+    {
+      "kind": "Empty",
+      "from": "",
+      "text": "[STV Stats] RED's medic died with 100% uber",
+      "tick": 27540
+    },
+    {
+      "kind": "TF_Chat_AllDead",
+      "from": "Chochy",
+      "text": "epic map",
+      "tick": 29596
+    },
+    {
+      "kind": "Empty",
+      "from": "",
+      "text": "[STV Stats] BLU had uber for 80 seconds before using it",
+      "tick": 32424
+    },
+    {
+      "kind": "Empty",
+      "from": "",
+      "text": "[STV Stats] RED's medic died with 100% uber",
+      "tick": 38084
+    },
+    {
+      "kind": "TF_Chat_AllDead",
+      "from": "Mystt",
+      "text": "howa re you this clueless",
+      "tick": 39696
+    },
+    {
+      "kind": "TF_Chat_All",
+      "from": "Chochy",
+      "text": "me?",
+      "tick": 40794
+    },
+    {
+      "kind": "TF_Chat_AllDead",
+      "from": "frying pan",
+      "text": "why are you up there",
+      "tick": 46256
+    },
+    {
+      "kind": "Empty",
+      "from": "",
+      "text": "#TF_TeamsSwitched",
+      "tick": 48464
+    },
+    {
+      "kind": "TF_Chat_All",
+      "from": "frying pan",
+      "text": "!log",
+      "tick": 48642
+    },
+    {
+      "kind": "TF_Chat_All",
+      "from": "Lucian",
+      "text": "!log",
+      "tick": 49060
+    },
+    {
+      "kind": "Empty",
+      "from": "",
+      "text": "[STV Stats] BLU lost their uber advantage (11 seconds)",
+      "tick": 52764
+    },
+    {
+      "kind": "Empty",
+      "from": "",
+      "text": "[STV Stats] BLU had uber for 72 seconds before using it",
+      "tick": 57374
+    },
+    {
+      "kind": "TF_Chat_AllDead",
+      "from": "Chochy",
+      "text": "'D?",
+      "tick": 59988
+    },
+    {
+      "kind": "TF_Chat_AllDead",
+      "from": "Chochy",
+      "text": "t",
+      "tick": 60618
+    },
+    {
+      "kind": "Empty",
+      "from": "",
+      "text": "[STV Stats] BLU lost their uber advantage (19 seconds)",
+      "tick": 81376
+    },
+    {
+      "kind": "Empty",
+      "from": "",
+      "text": "[STV Stats] BLU's medic died with 100% uber",
+      "tick": 82206
+    },
+    {
+      "kind": "Empty",
+      "from": "",
+      "text": "[STV Stats] BLU spent 9.1 seconds after spawning before healing",
+      "tick": 83404
+    },
+    {
+      "kind": "TF_Chat_AllDead",
+      "from": "Chochy",
+      "text": "unreal",
+      "tick": 85124
+    },
+    {
+      "kind": "TF_Chat_All",
+      "from": "Chochy",
+      "text": "u",
+      "tick": 85724
+    },
+    {
+      "kind": "TF_Chat_All",
+      "from": "Kireek",
+      "text": "gg",
+      "tick": 85732
+    },
+    {
+      "kind": "Empty",
+      "from": "",
+      "text": "[SOAP] Plugins reloaded.",
+      "tick": 85900
+    },
+    {
+      "kind": "TF_Chat_All",
+      "from": "",
+      "text": "[LogsTF] Uploading logs...",
+      "tick": 85900
+    }
+  ],
+  "users": {
+    "5": {
+      "classes": {},
+      "name": "UGC Highlander Match TV",
+      "userId": 5,
+      "steamId": "BOT",
+      "team": "other"
+    },
+    "54": {
+      "classes": {
+        "1": 24
+      },
+      "name": "[GC]Kimo",
+      "userId": 54,
+      "steamId": "[U:1:32061783]",
+      "team": "red"
+    },
+    "55": {
+      "classes": {
+        "3": 23
+      },
+      "name": "Chochy",
+      "userId": 55,
+      "steamId": "[U:1:315517891]",
+      "team": "red"
+    },
+    "56": {
+      "classes": {
+        "8": 23
+      },
+      "name": "Leonio",
+      "userId": 56,
+      "steamId": "[U:1:118129882]",
+      "team": "red"
+    },
+    "59": {
+      "classes": {
+        "9": 15
+      },
+      "name": "Kireek",
+      "userId": 59,
+      "steamId": "[U:1:92428736]",
+      "team": "red"
+    },
+    "62": {
+      "classes": {
+        "4": 14
+      },
+      "name": "Sian",
+      "userId": 62,
+      "steamId": "[U:1:168956829]",
+      "team": "blue"
+    },
+    "66": {
+      "classes": {
+        "2": 18,
+        "6": 1
+      },
+      "name": "Lucian",
+      "userId": 66,
+      "steamId": "[U:1:142193306]",
+      "team": "blue"
+    },
+    "67": {
+      "classes": {
+        "8": 19
+      },
+      "name": "FUMO 20 GRAMMI IN 10 MINUTI CAR",
+      "userId": 67,
+      "steamId": "[U:1:100768175]",
+      "team": "blue"
+    },
+    "68": {
+      "classes": {
+        "2": 21
+      },
+      "name": "twitch.tv/pineapple_wolf",
+      "userId": 68,
+      "steamId": "[U:1:90645211]",
+      "team": "red"
+    },
+    "69": {
+      "classes": {
+        "6": 1,
+        "7": 12
+      },
+      "name": "frying pan",
+      "userId": 69,
+      "steamId": "[U:1:182286974]",
+      "team": "blue"
+    },
+    "70": {
+      "classes": {
+        "6": 15
+      },
+      "name": "PiGG MaNN",
+      "userId": 70,
+      "steamId": "[U:1:47837183]",
+      "team": "blue"
+    },
+    "71": {
+      "classes": {
+        "9": 31
+      },
+      "name": "NRG",
+      "userId": 71,
+      "steamId": "[U:1:168955586]",
+      "team": "blue"
+    },
+    "72": {
+      "classes": {
+        "7": 14
+      },
+      "name": "blüht ein kleines blümelein",
+      "userId": 72,
+      "steamId": "[U:1:180975172]",
+      "team": "red"
+    },
+    "73": {
+      "classes": {
+        "3": 23
+      },
+      "name": "mèx B E L I E V E",
+      "userId": 73,
+      "steamId": "[U:1:15685844]",
+      "team": "blue"
+    },
+    "74": {
+      "classes": {
+        "5": 13
+      },
+      "name": "supra",
+      "userId": 74,
+      "steamId": "[U:1:51292522]",
+      "team": "red"
+    },
+    "75": {
+      "classes": {
+        "6": 19
+      },
+      "name": "GibZ'",
+      "userId": 75,
+      "steamId": "[U:1:67197479]",
+      "team": "red"
+    },
+    "76": {
+      "classes": {
+        "4": 16
+      },
+      "name": "Deepfried Monkey",
+      "userId": 76,
+      "steamId": "[U:1:68023218]",
+      "team": "red"
+    },
+    "78": {
+      "classes": {
+        "5": 10
+      },
+      "name": "Haku*",
+      "userId": 78,
+      "steamId": "[U:1:53026465]",
+      "team": "blue"
+    },
+    "79": {
+      "classes": {
+        "1": 22,
+        "6": 22
+      },
+      "name": "Mystt",
+      "userId": 79,
+      "steamId": "[U:1:154279630]",
+      "team": "blue"
+    }
+  },
+  "deaths": [
+    {
+      "weapon": "knife",
+      "victim": 68,
+      "assister": null,
+      "killer": 67,
+      "tick": 140
+    },
+    {
+      "weapon": "ubersaw",
+      "victim": 67,
+      "assister": 68,
+      "killer": 74,
+      "tick": 172
+    },
+    {
+      "weapon": "tf_projectile_rocket",
+      "victim": 71,
+      "assister": null,
+      "killer": 55,
+      "tick": 268
+    },
+    {
+      "weapon": "brass_beast",
+      "victim": 56,
+      "assister": null,
+      "killer": 70,
+      "tick": 300
+    },
+    {
+      "weapon": "sniperrifle",
+      "victim": 70,
+      "assister": 74,
+      "killer": 68,
+      "tick": 5940
+    },
+    {
+      "weapon": "obj_sentrygun3",
+      "victim": 55,
+      "assister": null,
+      "killer": 71,
+      "tick": 6108
+    },
+    {
+      "weapon": "blackbox",
+      "victim": 75,
+      "assister": null,
+      "killer": 73,
+      "tick": 6432
+    },
+    {
+      "weapon": "degreaser",
+      "victim": 67,
+      "assister": null,
+      "killer": 72,
+      "tick": 8304
+    },
+    {
+      "weapon": "sniperrifle",
+      "victim": 59,
+      "assister": null,
+      "killer": 66,
+      "tick": 8720
+    },
+    {
+      "weapon": "sniperrifle",
+      "victim": 66,
+      "assister": null,
+      "killer": 68,
+      "tick": 9070
+    },
+    {
+      "weapon": "scattergun",
+      "victim": 56,
+      "assister": null,
+      "killer": 79,
+      "tick": 9192
+    },
+    {
+      "weapon": "brass_beast",
+      "victim": 54,
+      "assister": 73,
+      "killer": 70,
+      "tick": 9328
+    },
+    {
+      "weapon": "shotgun_pyro",
+      "victim": 72,
+      "assister": 62,
+      "killer": 69,
+      "tick": 9690
+    },
+    {
+      "weapon": "tf_projectile_pipe_remote",
+      "victim": 76,
+      "assister": 78,
+      "killer": 62,
+      "tick": 9704
+    },
+    {
+      "weapon": "brass_beast",
+      "victim": 75,
+      "assister": null,
+      "killer": 70,
+      "tick": 9708
+    },
+    {
+      "weapon": "knife",
+      "victim": 68,
+      "assister": null,
+      "killer": 67,
+      "tick": 10516
+    },
+    {
+      "weapon": "knife",
+      "victim": 59,
+      "assister": 70,
+      "killer": 67,
+      "tick": 10640
+    },
+    {
+      "weapon": "scattergun",
+      "victim": 55,
+      "assister": 70,
+      "killer": 79,
+      "tick": 10776
+    },
+    {
+      "weapon": "blackbox",
+      "victim": 54,
+      "assister": 79,
+      "killer": 73,
+      "tick": 11196
+    },
+    {
+      "weapon": "sniperrifle",
+      "victim": 68,
+      "assister": 78,
+      "killer": 66,
+      "tick": 12128
+    },
+    {
+      "weapon": "sniperrifle",
+      "victim": 55,
+      "assister": null,
+      "killer": 66,
+      "tick": 12486
+    },
+    {
+      "weapon": "tf_projectile_pipe_remote",
+      "victim": 59,
+      "assister": 73,
+      "killer": 62,
+      "tick": 13066
+    },
+    {
+      "weapon": "blackbox",
+      "victim": 72,
+      "assister": 69,
+      "killer": 73,
+      "tick": 13084
+    },
+    {
+      "weapon": "scattergun",
+      "victim": 70,
+      "assister": 72,
+      "killer": 54,
+      "tick": 13134
+    },
+    {
+      "weapon": "scattergun",
+      "victim": 76,
+      "assister": 73,
+      "killer": 79,
+      "tick": 13172
+    },
+    {
+      "weapon": "scattergun",
+      "victim": 74,
+      "assister": 73,
+      "killer": 79,
+      "tick": 13224
+    },
+    {
+      "weapon": "scattergun",
+      "victim": 69,
+      "assister": 75,
+      "killer": 54,
+      "tick": 13384
+    },
+    {
+      "weapon": "scattergun",
+      "victim": 75,
+      "assister": 69,
+      "killer": 79,
+      "tick": 13392
+    },
+    {
+      "weapon": "blackbox",
+      "victim": 56,
+      "assister": 71,
+      "killer": 73,
+      "tick": 13462
+    },
+    {
+      "weapon": "pep_pistol",
+      "victim": 79,
+      "assister": null,
+      "killer": 54,
+      "tick": 13490
+    },
+    {
+      "weapon": "tf_projectile_pipe_remote",
+      "victim": 54,
+      "assister": null,
+      "killer": 62,
+      "tick": 13608
+    },
+    {
+      "weapon": "tf_projectile_pipe_remote",
+      "victim": 55,
+      "assister": null,
+      "killer": 62,
+      "tick": 14120
+    },
+    {
+      "weapon": "degreaser",
+      "victim": 56,
+      "assister": 73,
+      "killer": 69,
+      "tick": 15704
+    },
+    {
+      "weapon": "knife",
+      "victim": 68,
+      "assister": null,
+      "killer": 67,
+      "tick": 15836
+    },
+    {
+      "weapon": "blackbox",
+      "victim": 54,
+      "assister": 62,
+      "killer": 73,
+      "tick": 15922
+    },
+    {
+      "weapon": "tf_projectile_pipe_remote",
+      "victim": 73,
+      "assister": 55,
+      "killer": 76,
+      "tick": 16054
+    },
+    {
+      "weapon": "sniperrifle",
+      "victim": 76,
+      "assister": null,
+      "killer": 66,
+      "tick": 16320
+    },
+    {
+      "weapon": "brass_beast",
+      "victim": 75,
+      "assister": null,
+      "killer": 70,
+      "tick": 16336
+    },
+    {
+      "weapon": "shotgun_primary",
+      "victim": 70,
+      "assister": 75,
+      "killer": 59,
+      "tick": 16360
+    },
+    {
+      "weapon": "degreaser",
+      "victim": 59,
+      "assister": 71,
+      "killer": 69,
+      "tick": 16372
+    },
+    {
+      "weapon": "scattergun",
+      "victim": 55,
+      "assister": null,
+      "killer": 79,
+      "tick": 17490
+    },
+    {
+      "weapon": "degreaser",
+      "victim": 67,
+      "assister": null,
+      "killer": 72,
+      "tick": 19108
+    },
+    {
+      "weapon": "tf_projectile_rocket",
+      "victim": 73,
+      "assister": 54,
+      "killer": 55,
+      "tick": 19920
+    },
+    {
+      "weapon": "shotgun_pyro",
+      "victim": 69,
+      "assister": null,
+      "killer": 72,
+      "tick": 20240
+    },
+    {
+      "weapon": "tf_projectile_pipe_remote",
+      "victim": 72,
+      "assister": 78,
+      "killer": 62,
+      "tick": 20298
+    },
+    {
+      "weapon": "scattergun",
+      "victim": 55,
+      "assister": null,
+      "killer": 79,
+      "tick": 20504
+    },
+    {
+      "weapon": "minigun",
+      "victim": 79,
+      "assister": 54,
+      "killer": 75,
+      "tick": 20512
+    },
+    {
+      "weapon": "sniperrifle",
+      "victim": 62,
+      "assister": null,
+      "killer": 68,
+      "tick": 20588
+    },
+    {
+      "weapon": "sniperrifle",
+      "victim": 66,
+      "assister": null,
+      "killer": 68,
+      "tick": 20728
+    },
+    {
+      "weapon": "scattergun",
+      "victim": 70,
+      "assister": 76,
+      "killer": 54,
+      "tick": 21016
+    },
+    {
+      "weapon": "pep_pistol",
+      "victim": 78,
+      "assister": null,
+      "killer": 54,
+      "tick": 21148
+    },
+    {
+      "weapon": "knife",
+      "victim": 74,
+      "assister": null,
+      "killer": 67,
+      "tick": 21892
+    },
+    {
+      "weapon": "scattergun",
+      "victim": 75,
+      "assister": 73,
+      "killer": 79,
+      "tick": 22284
+    },
+    {
+      "weapon": "world",
+      "victim": 73,
+      "assister": null,
+      "killer": 68,
+      "tick": 22968
+    },
+    {
+      "weapon": "knife",
+      "victim": 76,
+      "assister": null,
+      "killer": 67,
+      "tick": 23676
+    },
+    {
+      "weapon": "scattergun",
+      "victim": 59,
+      "assister": 62,
+      "killer": 79,
+      "tick": 23688
+    },
+    {
+      "weapon": "scattergun",
+      "victim": 67,
+      "assister": 59,
+      "killer": 54,
+      "tick": 23692
+    },
+    {
+      "weapon": "tf_projectile_rocket",
+      "victim": 79,
+      "assister": null,
+      "killer": 55,
+      "tick": 24662
+    },
+    {
+      "weapon": "black_rose",
+      "victim": 66,
+      "assister": null,
+      "killer": 56,
+      "tick": 24792
+    },
+    {
+      "weapon": "world",
+      "victim": 55,
+      "assister": 78,
+      "killer": 69,
+      "tick": 24894
+    },
+    {
+      "weapon": "sniperrifle",
+      "victim": 73,
+      "assister": null,
+      "killer": 68,
+      "tick": 25404
+    },
+    {
+      "weapon": "tf_projectile_pipe_remote",
+      "victim": 54,
+      "assister": null,
+      "killer": 62,
+      "tick": 25582
+    },
+    {
+      "weapon": "knife",
+      "victim": 59,
+      "assister": null,
+      "killer": 67,
+      "tick": 26612
+    },
+    {
+      "weapon": "black_rose",
+      "victim": 71,
+      "assister": null,
+      "killer": 56,
+      "tick": 26656
+    },
+    {
+      "weapon": "degreaser",
+      "victim": 67,
+      "assister": 54,
+      "killer": 72,
+      "tick": 26846
+    },
+    {
+      "weapon": "iron_curtain",
+      "victim": 72,
+      "assister": null,
+      "killer": 70,
+      "tick": 26944
+    },
+    {
+      "weapon": "scattergun",
+      "victim": 70,
+      "assister": 76,
+      "killer": 54,
+      "tick": 27152
+    },
+    {
+      "weapon": "sniperrifle",
+      "victim": 66,
+      "assister": null,
+      "killer": 68,
+      "tick": 27396
+    },
+    {
+      "weapon": "minigun",
+      "victim": 62,
+      "assister": null,
+      "killer": 75,
+      "tick": 27476
+    },
+    {
+      "weapon": "black_rose",
+      "victim": 78,
+      "assister": 75,
+      "killer": 56,
+      "tick": 27540
+    },
+    {
+      "weapon": "scattergun",
+      "victim": 75,
+      "assister": null,
+      "killer": 79,
+      "tick": 27628
+    },
+    {
+      "weapon": "black_rose",
+      "victim": 73,
+      "assister": null,
+      "killer": 56,
+      "tick": 27700
+    },
+    {
+      "weapon": "tf_projectile_pipe_remote",
+      "victim": 69,
+      "assister": 74,
+      "killer": 76,
+      "tick": 28260
+    },
+    {
+      "weapon": "degreaser",
+      "victim": 79,
+      "assister": 74,
+      "killer": 72,
+      "tick": 28612
+    },
+    {
+      "weapon": "big_earner",
+      "victim": 75,
+      "assister": null,
+      "killer": 67,
+      "tick": 29296
+    },
+    {
+      "weapon": "iron_curtain",
+      "victim": 68,
+      "assister": null,
+      "killer": 70,
+      "tick": 29300
+    },
+    {
+      "weapon": "blackbox",
+      "victim": 55,
+      "assister": null,
+      "killer": 73,
+      "tick": 29352
+    },
+    {
+      "weapon": "iron_curtain",
+      "victim": 56,
+      "assister": null,
+      "killer": 70,
+      "tick": 29666
+    },
+    {
+      "weapon": "scattergun",
+      "victim": 68,
+      "assister": 66,
+      "killer": 79,
+      "tick": 31122
+    },
+    {
+      "weapon": "sniperrifle",
+      "victim": 59,
+      "assister": null,
+      "killer": 66,
+      "tick": 32236
+    },
+    {
+      "weapon": "black_rose",
+      "victim": 73,
+      "assister": 55,
+      "killer": 56,
+      "tick": 32274
+    },
+    {
+      "weapon": "scattergun",
+      "victim": 56,
+      "assister": null,
+      "killer": 79,
+      "tick": 32356
+    },
+    {
+      "weapon": "tf_projectile_rocket",
+      "victim": 79,
+      "assister": null,
+      "killer": 55,
+      "tick": 32480
+    },
+    {
+      "weapon": "iron_curtain",
+      "victim": 54,
+      "assister": null,
+      "killer": 70,
+      "tick": 33084
+    },
+    {
+      "weapon": "degreaser",
+      "victim": 67,
+      "assister": null,
+      "killer": 72,
+      "tick": 33132
+    },
+    {
+      "weapon": "tf_projectile_pipe_remote",
+      "victim": 71,
+      "assister": 74,
+      "killer": 76,
+      "tick": 33370
+    },
+    {
+      "weapon": "iron_bomber",
+      "victim": 68,
+      "assister": null,
+      "killer": 62,
+      "tick": 33388
+    },
+    {
+      "weapon": "obj_sentrygun3",
+      "victim": 74,
+      "assister": null,
+      "killer": 71,
+      "tick": 33536
+    },
+    {
+      "weapon": "degreaser",
+      "victim": 75,
+      "assister": 78,
+      "killer": 69,
+      "tick": 33600
+    },
+    {
+      "weapon": "degreaser",
+      "victim": 76,
+      "assister": null,
+      "killer": 69,
+      "tick": 33804
+    },
+    {
+      "weapon": "deflect_rocket",
+      "victim": 55,
+      "assister": null,
+      "killer": 69,
+      "tick": 34004
+    },
+    {
+      "weapon": "scattergun",
+      "victim": 69,
+      "assister": 72,
+      "killer": 54,
+      "tick": 34112
+    },
+    {
+      "weapon": "scattergun",
+      "victim": 79,
+      "assister": 72,
+      "killer": 54,
+      "tick": 34628
+    },
+    {
+      "weapon": "blackbox",
+      "victim": 68,
+      "assister": null,
+      "killer": 73,
+      "tick": 35058
+    },
+    {
+      "weapon": "blackbox",
+      "victim": 54,
+      "assister": null,
+      "killer": 73,
+      "tick": 35408
+    },
+    {
+      "weapon": "shotgun_pyro",
+      "victim": 69,
+      "assister": 55,
+      "killer": 72,
+      "tick": 35976
+    },
+    {
+      "weapon": "scattergun",
+      "victim": 56,
+      "assister": null,
+      "killer": 79,
+      "tick": 36464
+    },
+    {
+      "weapon": "scattergun",
+      "victim": 68,
+      "assister": 67,
+      "killer": 79,
+      "tick": 36980
+    },
+    {
+      "weapon": "frontier_kill",
+      "victim": 67,
+      "assister": null,
+      "killer": 59,
+      "tick": 37980
+    },
+    {
+      "weapon": "tf_projectile_pipe_remote",
+      "victim": 78,
+      "assister": null,
+      "killer": 76,
+      "tick": 38084
+    },
+    {
+      "weapon": "rescue_ranger",
+      "victim": 56,
+      "assister": null,
+      "killer": 71,
+      "tick": 38962
+    },
+    {
+      "weapon": "iron_curtain",
+      "victim": 74,
+      "assister": null,
+      "killer": 70,
+      "tick": 38980
+    },
+    {
+      "weapon": "degreaser",
+      "victim": 62,
+      "assister": null,
+      "killer": 72,
+      "tick": 39100
+    },
+    {
+      "weapon": "shotgun_pyro",
+      "victim": 76,
+      "assister": 70,
+      "killer": 69,
+      "tick": 39140
+    },
+    {
+      "weapon": "disciplinary_action",
+      "victim": 79,
+      "assister": null,
+      "killer": 55,
+      "tick": 39182
+    },
+    {
+      "weapon": "iron_curtain",
+      "victim": 75,
+      "assister": 69,
+      "killer": 70,
+      "tick": 39296
+    },
+    {
+      "weapon": "shotgun_pyro",
+      "victim": 68,
+      "assister": null,
+      "killer": 69,
+      "tick": 39312
+    },
+    {
+      "weapon": "degreaser",
+      "victim": 59,
+      "assister": null,
+      "killer": 69,
+      "tick": 39464
+    },
+    {
+      "weapon": "sniperrifle",
+      "victim": 54,
+      "assister": null,
+      "killer": 66,
+      "tick": 39628
+    },
+    {
+      "weapon": "shotgun_primary",
+      "victim": 72,
+      "assister": 69,
+      "killer": 71,
+      "tick": 39710
+    },
+    {
+      "weapon": "black_rose",
+      "victim": 66,
+      "assister": null,
+      "killer": 56,
+      "tick": 40920
+    },
+    {
+      "weapon": "tf_projectile_rocket",
+      "victim": 78,
+      "assister": null,
+      "killer": 55,
+      "tick": 41532
+    },
+    {
+      "weapon": "degreaser",
+      "victim": 67,
+      "assister": null,
+      "killer": 72,
+      "tick": 41564
+    },
+    {
+      "weapon": "scattergun",
+      "victim": 55,
+      "assister": 70,
+      "killer": 79,
+      "tick": 41568
+    },
+    {
+      "weapon": "sniperrifle",
+      "victim": 62,
+      "assister": null,
+      "killer": 68,
+      "tick": 41764
+    },
+    {
+      "weapon": "iron_curtain",
+      "victim": 76,
+      "assister": 62,
+      "killer": 70,
+      "tick": 41776
+    },
+    {
+      "weapon": "degreaser",
+      "victim": 56,
+      "assister": null,
+      "killer": 69,
+      "tick": 41966
+    },
+    {
+      "weapon": "scattergun",
+      "victim": 79,
+      "assister": 72,
+      "killer": 54,
+      "tick": 42116
+    },
+    {
+      "weapon": "iron_curtain",
+      "victim": 75,
+      "assister": null,
+      "killer": 70,
+      "tick": 42138
+    },
+    {
+      "weapon": "sniperrifle",
+      "victim": 70,
+      "assister": 75,
+      "killer": 68,
+      "tick": 42240
+    },
+    {
+      "weapon": "degreaser",
+      "victim": 54,
+      "assister": 73,
+      "killer": 69,
+      "tick": 42288
+    },
+    {
+      "weapon": "blackbox",
+      "victim": 74,
+      "assister": null,
+      "killer": 73,
+      "tick": 42364
+    },
+    {
+      "weapon": "shotgun_pyro",
+      "victim": 73,
+      "assister": null,
+      "killer": 72,
+      "tick": 42656
+    },
+    {
+      "weapon": "shotgun_pyro",
+      "victim": 72,
+      "assister": 73,
+      "killer": 69,
+      "tick": 42744
+    },
+    {
+      "weapon": "degreaser",
+      "victim": 68,
+      "assister": null,
+      "killer": 69,
+      "tick": 43072
+    },
+    {
+      "weapon": "tf_projectile_rocket",
+      "victim": 78,
+      "assister": 59,
+      "killer": 55,
+      "tick": 43596
+    },
+    {
+      "weapon": "tf_projectile_rocket",
+      "victim": 62,
+      "assister": 59,
+      "killer": 55,
+      "tick": 43674
+    },
+    {
+      "weapon": "scattergun",
+      "victim": 69,
+      "assister": 76,
+      "killer": 54,
+      "tick": 43696
+    },
+    {
+      "weapon": "scattergun",
+      "victim": 56,
+      "assister": null,
+      "killer": 79,
+      "tick": 43832
+    },
+    {
+      "weapon": "frontier_kill",
+      "victim": 67,
+      "assister": null,
+      "killer": 59,
+      "tick": 43976
+    },
+    {
+      "weapon": "sniperrifle",
+      "victim": 68,
+      "assister": null,
+      "killer": 66,
+      "tick": 44140
+    },
+    {
+      "weapon": "scattergun",
+      "victim": 79,
+      "assister": null,
+      "killer": 54,
+      "tick": 44586
+    },
+    {
+      "weapon": "iron_curtain",
+      "victim": 55,
+      "assister": null,
+      "killer": 70,
+      "tick": 44604
+    },
+    {
+      "weapon": "scattergun",
+      "victim": 73,
+      "assister": null,
+      "killer": 54,
+      "tick": 44848
+    },
+    {
+      "weapon": "iron_curtain",
+      "victim": 72,
+      "assister": null,
+      "killer": 70,
+      "tick": 44890
+    },
+    {
+      "weapon": "iron_curtain",
+      "victim": 54,
+      "assister": 69,
+      "killer": 70,
+      "tick": 45012
+    },
+    {
+      "weapon": "black_rose",
+      "victim": 69,
+      "assister": null,
+      "killer": 56,
+      "tick": 45742
+    },
+    {
+      "weapon": "minigun",
+      "victim": 67,
+      "assister": null,
+      "killer": 75,
+      "tick": 46268
+    },
+    {
+      "weapon": "sniperrifle",
+      "victim": 66,
+      "assister": null,
+      "killer": 68,
+      "tick": 46556
+    },
+    {
+      "weapon": "iron_bomber",
+      "victim": 56,
+      "assister": null,
+      "killer": 62,
+      "tick": 46592
+    },
+    {
+      "weapon": "scattergun",
+      "victim": 62,
+      "assister": null,
+      "killer": 54,
+      "tick": 47072
+    },
+    {
+      "weapon": "sniperrifle",
+      "victim": 70,
+      "assister": 54,
+      "killer": 68,
+      "tick": 47732
+    },
+    {
+      "weapon": "trigger_hurt",
+      "victim": 73,
+      "assister": null,
+      "killer": 0,
+      "tick": 48056
+    },
+    {
+      "weapon": "minigun",
+      "victim": 67,
+      "assister": null,
+      "killer": 75,
+      "tick": 48172
+    },
+    {
+      "weapon": "obj_sentrygun2",
+      "victim": 69,
+      "assister": null,
+      "killer": 59,
+      "tick": 48192
+    },
+    {
+      "weapon": "world",
+      "victim": 54,
+      "assister": null,
+      "killer": 54,
+      "tick": 48244
+    },
+    {
+      "weapon": "player",
+      "victim": 72,
+      "assister": null,
+      "killer": 71,
+      "tick": 48244
+    },
+    {
+      "weapon": "world",
+      "victim": 71,
+      "assister": null,
+      "killer": 54,
+      "tick": 48244
+    },
+    {
+      "weapon": "world",
+      "victim": 56,
+      "assister": null,
+      "killer": 56,
+      "tick": 48258
+    },
+    {
+      "weapon": "world",
+      "victim": 76,
+      "assister": null,
+      "killer": 76,
+      "tick": 48264
+    },
+    {
+      "weapon": "world",
+      "victim": 54,
+      "assister": null,
+      "killer": 54,
+      "tick": 49580
+    },
+    {
+      "weapon": "world",
+      "victim": 74,
+      "assister": null,
+      "killer": 74,
+      "tick": 50740
+    },
+    {
+      "weapon": "sniperrifle",
+      "victim": 66,
+      "assister": null,
+      "killer": 68,
+      "tick": 53604
+    },
+    {
+      "weapon": "sniperrifle",
+      "victim": 79,
+      "assister": null,
+      "killer": 68,
+      "tick": 54184
+    },
+    {
+      "weapon": "sniperrifle",
+      "victim": 73,
+      "assister": 54,
+      "killer": 68,
+      "tick": 55276
+    },
+    {
+      "weapon": "sniperrifle",
+      "victim": 68,
+      "assister": 79,
+      "killer": 66,
+      "tick": 56272
+    },
+    {
+      "weapon": "sniperrifle",
+      "victim": 76,
+      "assister": null,
+      "killer": 66,
+      "tick": 56900
+    },
+    {
+      "weapon": "iron_curtain",
+      "victim": 72,
+      "assister": 71,
+      "killer": 70,
+      "tick": 57332
+    },
+    {
+      "weapon": "sniperrifle",
+      "victim": 55,
+      "assister": null,
+      "killer": 66,
+      "tick": 57514
+    },
+    {
+      "weapon": "shotgun_pyro",
+      "victim": 56,
+      "assister": null,
+      "killer": 69,
+      "tick": 57700
+    },
+    {
+      "weapon": "sniperrifle",
+      "victim": 75,
+      "assister": 79,
+      "killer": 66,
+      "tick": 58056
+    },
+    {
+      "weapon": "scattergun",
+      "victim": 73,
+      "assister": 72,
+      "killer": 54,
+      "tick": 59216
+    },
+    {
+      "weapon": "iron_curtain",
+      "victim": 72,
+      "assister": 62,
+      "killer": 70,
+      "tick": 59232
+    },
+    {
+      "weapon": "shotgun_primary",
+      "victim": 55,
+      "assister": 79,
+      "killer": 71,
+      "tick": 59864
+    },
+    {
+      "weapon": "tf_projectile_pipe_remote",
+      "victim": 70,
+      "assister": null,
+      "killer": 76,
+      "tick": 59880
+    },
+    {
+      "weapon": "sniperrifle",
+      "victim": 66,
+      "assister": null,
+      "killer": 68,
+      "tick": 59940
+    },
+    {
+      "weapon": "scattergun",
+      "victim": 56,
+      "assister": 71,
+      "killer": 79,
+      "tick": 60326
+    },
+    {
+      "weapon": "obj_sentrygun2",
+      "victim": 67,
+      "assister": 68,
+      "killer": 59,
+      "tick": 60506
+    },
+    {
+      "weapon": "iron_curtain",
+      "victim": 55,
+      "assister": 62,
+      "killer": 70,
+      "tick": 61824
+    },
+    {
+      "weapon": "sniperrifle",
+      "victim": 70,
+      "assister": null,
+      "killer": 68,
+      "tick": 61986
+    },
+    {
+      "weapon": "tf_projectile_rocket",
+      "victim": 76,
+      "assister": null,
+      "killer": 73,
+      "tick": 62120
+    },
+    {
+      "weapon": "tf_projectile_rocket",
+      "victim": 75,
+      "assister": 71,
+      "killer": 73,
+      "tick": 62432
+    },
+    {
+      "weapon": "tf_projectile_pipe_remote",
+      "victim": 59,
+      "assister": 78,
+      "killer": 62,
+      "tick": 62584
+    },
+    {
+      "weapon": "sniperrifle",
+      "victim": 79,
+      "assister": null,
+      "killer": 68,
+      "tick": 62608
+    },
+    {
+      "weapon": "sniperrifle",
+      "victim": 68,
+      "assister": null,
+      "killer": 66,
+      "tick": 62802
+    },
+    {
+      "weapon": "degreaser",
+      "victim": 56,
+      "assister": null,
+      "killer": 69,
+      "tick": 63036
+    },
+    {
+      "weapon": "degreaser",
+      "victim": 62,
+      "assister": null,
+      "killer": 72,
+      "tick": 63056
+    },
+    {
+      "weapon": "blackbox",
+      "victim": 67,
+      "assister": null,
+      "killer": 55,
+      "tick": 63316
+    },
+    {
+      "weapon": "degreaser",
+      "victim": 54,
+      "assister": 78,
+      "killer": 69,
+      "tick": 63536
+    },
+    {
+      "weapon": "tf_projectile_rocket",
+      "victim": 68,
+      "assister": null,
+      "killer": 73,
+      "tick": 65000
+    },
+    {
+      "weapon": "black_rose",
+      "victim": 73,
+      "assister": null,
+      "killer": 56,
+      "tick": 65156
+    },
+    {
+      "weapon": "degreaser",
+      "victim": 71,
+      "assister": 74,
+      "killer": 72,
+      "tick": 65640
+    },
+    {
+      "weapon": "shotgun_pyro",
+      "victim": 79,
+      "assister": 54,
+      "killer": 72,
+      "tick": 65880
+    },
+    {
+      "weapon": "tf_projectile_pipe_remote",
+      "victim": 55,
+      "assister": null,
+      "killer": 62,
+      "tick": 66224
+    },
+    {
+      "weapon": "degreaser",
+      "victim": 56,
+      "assister": null,
+      "killer": 69,
+      "tick": 66312
+    },
+    {
+      "weapon": "world",
+      "victim": 76,
+      "assister": null,
+      "killer": 66,
+      "tick": 66796
+    },
+    {
+      "weapon": "scattergun",
+      "victim": 62,
+      "assister": null,
+      "killer": 54,
+      "tick": 66888
+    },
+    {
+      "weapon": "scattergun",
+      "victim": 66,
+      "assister": null,
+      "killer": 54,
+      "tick": 67056
+    },
+    {
+      "weapon": "sniperrifle",
+      "victim": 73,
+      "assister": 74,
+      "killer": 68,
+      "tick": 68304
+    },
+    {
+      "weapon": "degreaser",
+      "victim": 56,
+      "assister": null,
+      "killer": 69,
+      "tick": 68618
+    },
+    {
+      "weapon": "minigun",
+      "victim": 70,
+      "assister": 72,
+      "killer": 75,
+      "tick": 68868
+    },
+    {
+      "weapon": "scattergun",
+      "victim": 67,
+      "assister": null,
+      "killer": 54,
+      "tick": 69180
+    },
+    {
+      "weapon": "tf_projectile_pipe_remote",
+      "victim": 71,
+      "assister": 72,
+      "killer": 76,
+      "tick": 69444
+    },
+    {
+      "weapon": "world",
+      "victim": 78,
+      "assister": 74,
+      "killer": 72,
+      "tick": 69488
+    },
+    {
+      "weapon": "tf_projectile_rocket",
+      "victim": 55,
+      "assister": null,
+      "killer": 73,
+      "tick": 69628
+    },
+    {
+      "weapon": "scattergun",
+      "victim": 72,
+      "assister": null,
+      "killer": 79,
+      "tick": 69708
+    },
+    {
+      "weapon": "world",
+      "victim": 79,
+      "assister": null,
+      "killer": 72,
+      "tick": 69760
+    },
+    {
+      "weapon": "degreaser",
+      "victim": 54,
+      "assister": null,
+      "killer": 69,
+      "tick": 69896
+    },
+    {
+      "weapon": "tf_projectile_pipe",
+      "victim": 69,
+      "assister": 75,
+      "killer": 76,
+      "tick": 71112
+    },
+    {
+      "weapon": "tf_projectile_rocket",
+      "victim": 55,
+      "assister": 79,
+      "killer": 73,
+      "tick": 71428
+    },
+    {
+      "weapon": "scattergun",
+      "victim": 54,
+      "assister": 66,
+      "killer": 79,
+      "tick": 71512
+    },
+    {
+      "weapon": "obj_sentrygun3",
+      "victim": 79,
+      "assister": 68,
+      "killer": 59,
+      "tick": 71568
+    },
+    {
+      "weapon": "obj_sentrygun3",
+      "victim": 62,
+      "assister": null,
+      "killer": 59,
+      "tick": 71614
+    },
+    {
+      "weapon": "black_rose",
+      "victim": 66,
+      "assister": null,
+      "killer": 56,
+      "tick": 71768
+    },
+    {
+      "weapon": "tf_projectile_rocket",
+      "victim": 74,
+      "assister": null,
+      "killer": 73,
+      "tick": 71888
+    },
+    {
+      "weapon": "iron_curtain",
+      "victim": 75,
+      "assister": 73,
+      "killer": 70,
+      "tick": 71892
+    },
+    {
+      "weapon": "tf_projectile_rocket",
+      "victim": 72,
+      "assister": 70,
+      "killer": 73,
+      "tick": 71928
+    },
+    {
+      "weapon": "knife",
+      "victim": 68,
+      "assister": null,
+      "killer": 67,
+      "tick": 72024
+    },
+    {
+      "weapon": "degreaser",
+      "victim": 56,
+      "assister": null,
+      "killer": 69,
+      "tick": 72200
+    },
+    {
+      "weapon": "world",
+      "victim": 73,
+      "assister": null,
+      "killer": 76,
+      "tick": 72488
+    },
+    {
+      "weapon": "scattergun",
+      "victim": 70,
+      "assister": null,
+      "killer": 54,
+      "tick": 73440
+    },
+    {
+      "weapon": "degreaser",
+      "victim": 54,
+      "assister": 78,
+      "killer": 69,
+      "tick": 73596
+    },
+    {
+      "weapon": "blackbox",
+      "victim": 73,
+      "assister": 76,
+      "killer": 55,
+      "tick": 74352
+    },
+    {
+      "weapon": "black_rose",
+      "victim": 66,
+      "assister": 55,
+      "killer": 56,
+      "tick": 74616
+    },
+    {
+      "weapon": "scattergun",
+      "victim": 70,
+      "assister": 76,
+      "killer": 54,
+      "tick": 75264
+    },
+    {
+      "weapon": "tf_projectile_pipe_remote",
+      "victim": 74,
+      "assister": 78,
+      "killer": 62,
+      "tick": 75412
+    },
+    {
+      "weapon": "scattergun",
+      "victim": 75,
+      "assister": null,
+      "killer": 79,
+      "tick": 75732
+    },
+    {
+      "weapon": "blackbox",
+      "victim": 73,
+      "assister": null,
+      "killer": 55,
+      "tick": 75780
+    },
+    {
+      "weapon": "sniperrifle",
+      "victim": 79,
+      "assister": 75,
+      "killer": 68,
+      "tick": 75784
+    },
+    {
+      "weapon": "sniperrifle",
+      "victim": 68,
+      "assister": null,
+      "killer": 66,
+      "tick": 76160
+    },
+    {
+      "weapon": "black_rose",
+      "victim": 66,
+      "assister": null,
+      "killer": 56,
+      "tick": 76196
+    },
+    {
+      "weapon": "deflect_promode",
+      "victim": 76,
+      "assister": null,
+      "killer": 69,
+      "tick": 76296
+    },
+    {
+      "weapon": "degreaser",
+      "victim": 56,
+      "assister": null,
+      "killer": 69,
+      "tick": 76676
+    },
+    {
+      "weapon": "blackbox",
+      "victim": 62,
+      "assister": null,
+      "killer": 55,
+      "tick": 76708
+    },
+    {
+      "weapon": "blackbox",
+      "victim": 79,
+      "assister": 54,
+      "killer": 55,
+      "tick": 77284
+    },
+    {
+      "weapon": "blackbox",
+      "victim": 67,
+      "assister": 54,
+      "killer": 55,
+      "tick": 77284
+    },
+    {
+      "weapon": "blackbox",
+      "victim": 71,
+      "assister": 54,
+      "killer": 55,
+      "tick": 77354
+    },
+    {
+      "weapon": "shotgun_pyro",
+      "victim": 73,
+      "assister": null,
+      "killer": 72,
+      "tick": 77628
+    },
+    {
+      "weapon": "scattergun",
+      "victim": 66,
+      "assister": null,
+      "killer": 54,
+      "tick": 78054
+    },
+    {
+      "weapon": "degreaser",
+      "victim": 54,
+      "assister": 78,
+      "killer": 69,
+      "tick": 78512
+    },
+    {
+      "weapon": "minigun",
+      "victim": 73,
+      "assister": 55,
+      "killer": 75,
+      "tick": 78696
+    },
+    {
+      "weapon": "iron_curtain",
+      "victim": 75,
+      "assister": 62,
+      "killer": 70,
+      "tick": 78860
+    },
+    {
+      "weapon": "iron_curtain",
+      "victim": 76,
+      "assister": null,
+      "killer": 70,
+      "tick": 79596
+    },
+    {
+      "weapon": "tf_projectile_pipe_remote",
+      "victim": 68,
+      "assister": 69,
+      "killer": 62,
+      "tick": 79808
+    },
+    {
+      "weapon": "degreaser",
+      "victim": 67,
+      "assister": 74,
+      "killer": 72,
+      "tick": 80304
+    },
+    {
+      "weapon": "obj_sentrygun2",
+      "victim": 54,
+      "assister": 69,
+      "killer": 71,
+      "tick": 80972
+    },
+    {
+      "weapon": "black_rose",
+      "victim": 71,
+      "assister": null,
+      "killer": 56,
+      "tick": 81144
+    },
+    {
+      "weapon": "giger_counter",
+      "victim": 62,
+      "assister": null,
+      "killer": 59,
+      "tick": 81256
+    },
+    {
+      "weapon": "scattergun",
+      "victim": 55,
+      "assister": null,
+      "killer": 79,
+      "tick": 81262
+    },
+    {
+      "weapon": "minigun",
+      "victim": 66,
+      "assister": 74,
+      "killer": 75,
+      "tick": 81684
+    },
+    {
+      "weapon": "tf_projectile_rocket",
+      "victim": 56,
+      "assister": null,
+      "killer": 73,
+      "tick": 81864
+    },
+    {
+      "weapon": "sniperrifle",
+      "victim": 78,
+      "assister": null,
+      "killer": 68,
+      "tick": 82206
+    },
+    {
+      "weapon": "knife",
+      "victim": 75,
+      "assister": 69,
+      "killer": 67,
+      "tick": 82712
+    },
+    {
+      "weapon": "scattergun",
+      "victim": 79,
+      "assister": null,
+      "killer": 54,
+      "tick": 82722
+    },
+    {
+      "weapon": "iron_bomber",
+      "victim": 76,
+      "assister": null,
+      "killer": 62,
+      "tick": 82836
+    },
+    {
+      "weapon": "shotgun_primary",
+      "victim": 54,
+      "assister": null,
+      "killer": 71,
+      "tick": 82920
+    },
+    {
+      "weapon": "revolver",
+      "victim": 74,
+      "assister": 69,
+      "killer": 67,
+      "tick": 82998
+    },
+    {
+      "weapon": "sniperrifle",
+      "victim": 68,
+      "assister": null,
+      "killer": 66,
+      "tick": 83442
+    },
+    {
+      "weapon": "sniperrifle",
+      "victim": 59,
+      "assister": 69,
+      "killer": 66,
+      "tick": 83920
+    },
+    {
+      "weapon": "degreaser",
+      "victim": 67,
+      "assister": null,
+      "killer": 72,
+      "tick": 83964
+    },
+    {
+      "weapon": "degreaser",
+      "victim": 73,
+      "assister": 55,
+      "killer": 72,
+      "tick": 84270
+    },
+    {
+      "weapon": "black_rose",
+      "victim": 62,
+      "assister": null,
+      "killer": 56,
+      "tick": 84492
+    },
+    {
+      "weapon": "maxgun",
+      "victim": 56,
+      "assister": 69,
+      "killer": 71,
+      "tick": 84520
+    },
+    {
+      "weapon": "degreaser",
+      "victim": 55,
+      "assister": null,
+      "killer": 69,
+      "tick": 84852
+    },
+    {
+      "weapon": "degreaser",
+      "victim": 54,
+      "assister": 79,
+      "killer": 69,
+      "tick": 84912
+    },
+    {
+      "weapon": "shotgun_pyro",
+      "victim": 70,
+      "assister": 75,
+      "killer": 72,
+      "tick": 85152
+    },
+    {
+      "weapon": "sniperrifle",
+      "victim": 71,
+      "assister": null,
+      "killer": 68,
+      "tick": 85268
+    },
+    {
+      "weapon": "world",
+      "victim": 79,
+      "assister": 75,
+      "killer": 72,
+      "tick": 85680
+    },
+    {
+      "weapon": "world",
+      "victim": 69,
+      "assister": null,
+      "killer": 75,
+      "tick": 85680
+    },
+    {
+      "weapon": "world",
+      "victim": 76,
+      "assister": null,
+      "killer": 76,
+      "tick": 85680
+    },
+    {
+      "weapon": "player",
+      "victim": 72,
+      "assister": null,
+      "killer": 70,
+      "tick": 85692
+    },
+    {
+      "weapon": "world",
+      "victim": 74,
+      "assister": null,
+      "killer": 69,
+      "tick": 85692
+    },
+    {
+      "weapon": "knife",
+      "victim": 59,
+      "assister": null,
+      "killer": 67,
+      "tick": 85748
+    }
+  ],
+  "rounds": [
+    {
+      "winner": "blue",
+      "length": 716.94,
+      "end_tick": 48128
+    },
+    {
+      "winner": "blue",
+      "length": 556.5299,
+      "end_tick": 85564
+    }
+  ],
+  "startTick": 27136,
+  "intervalPerTick": 0.015,
+  "pauses": []
+}
