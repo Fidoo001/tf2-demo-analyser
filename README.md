@@ -44,12 +44,12 @@ You need to have cargo installed to build this program from source.
 
 There are several optional build features, it is recommended to keep all of them.
  - parallel - runs multiple workers at once to analyse demos faster
- - RCON - adds features that use RCON: party chat warnings and live scanning
- - TF2BD - TF2BD playerlist support, used to mark players with custom playerlist
+ - RCON - adds features that use RCON: party chat warnings and live scanning, GUI only
+ - TF2BD - TF2BD playerlist support, used to mark players with custom playerlist, GUI only
 
 To build the GUI with all features:
 
-`cargo build --release --bin gui --features "gui rcon parallel"` 
+`cargo build --release --bin gui --features "gui rcon parallel TF2BD"` 
 
 To build the CLI:
 
