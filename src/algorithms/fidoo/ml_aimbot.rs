@@ -450,7 +450,7 @@ impl MlAimbot {
     pub fn new() -> Self {
         Self {
             params: Parameters::from([
-                ("enabled".to_string(), Parameter::Bool(false)),
+                ("enabled".to_string(), Parameter::Bool(true)),
                 ("min_score".to_string(), Parameter::Float(0.7)),
                 ("min_hits".to_string(), Parameter::Int(5)),
                 ("max_detections".to_string(), Parameter::Int(3)),
@@ -499,7 +499,7 @@ impl MlAimbot {
 
 impl<'a> CheatAlgorithm<'a> for MlAimbot {
     fn default(&self) -> bool {
-        false
+        true
     }
 
     fn algorithm_name(&self) -> &str {

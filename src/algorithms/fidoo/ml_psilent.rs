@@ -796,7 +796,7 @@ impl MlPsilent {
     pub fn new() -> Self {
         Self {
             params: Parameters::from([
-                ("enabled".to_string(), Parameter::Bool(false)),
+                ("enabled".to_string(), Parameter::Bool(true)),
                 ("min_score".to_string(), Parameter::Float(0.7)),
                 ("min_launches".to_string(), Parameter::Int(1)),
                 ("min_shot_score".to_string(), Parameter::Float(0.5)),
@@ -902,7 +902,7 @@ impl MlPsilent {
 
 impl<'a> CheatAlgorithm<'a> for MlPsilent {
     fn default(&self) -> bool {
-        false
+        true
     }
 
     fn algorithm_name(&self) -> &str {

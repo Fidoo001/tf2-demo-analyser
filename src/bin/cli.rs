@@ -15,6 +15,7 @@ use analysis_template::{
     util::helpers::{
         convert_demo_to_replay, convert_demo_to_replay_with_takes, find_default_tf2_dir,
         format_sus_demo_filename, strip_consolecmds_from_bytes,
+        write_stripped_demo_to_replays,
         ReplaySuspect, ReplayTakeInput,
     },
     SILENT,
@@ -457,6 +458,7 @@ enum BulkDemoResult {
     Analysed {
         analyser: CheatAnalyser<'static>,
         stripped_count: Option<usize>,
+        stripped_bytes: Option<Vec<u8>>,
     },
     StrippedOnly {
         stripped_count: usize,
@@ -482,9 +484,10 @@ fn analyse_bulk_demo(
     strip_only: bool,
     valve_only: bool,
     scratch_dir: &Option<PathBuf>,
+    keep_stripped_bytes: bool,
 ) -> BulkDemoResult {
     let guarded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        analyse_bulk_demo_unguarded(demo_path, config, specified_algorithms, strip, strip_only, valve_only, scratch_dir)
+        analyse_bulk_demo_unguarded(demo_path, config, specified_algorithms, strip, strip_only, valve_only, scratch_dir, keep_stripped_bytes)
     }));
     match guarded {
         Ok(result) => result,
@@ -507,6 +510,7 @@ fn analyse_bulk_demo_unguarded(
     strip_only: bool,
     valve_only: bool,
     scratch_dir: &Option<PathBuf>,
+    keep_stripped_bytes: bool,
 ) -> BulkDemoResult {
     let file_bytes = match fs::read(demo_path) {
         Ok(bytes) => bytes,
@@ -555,9 +559,15 @@ fn analyse_bulk_demo_unguarded(
         Ok(mut analyser) => {
             // Free the algorithms' state while the result waits to be handled in file order.
             analyser.algorithms.clear();
+            let stripped_bytes_opt = if keep_stripped_bytes {
+                Some(bytes_to_analyse)
+            } else {
+                None
+            };
             BulkDemoResult::Analysed {
                 analyser,
                 stripped_count,
+                stripped_bytes: stripped_bytes_opt,
             }
         }
         Err(e) => BulkDemoResult::AnalysisFailed(e),
@@ -582,13 +592,15 @@ fn run_bulk_scan(
     custom_scratch_dir: Option<PathBuf>,
     cleanup_jsons: bool,
 ) -> Result<(), Error> {
+    let replay_creation = replay_old || replay_new;
+    let use_scratch = strip_only || (strip && !replay_creation);
     let scratch_dir = custom_scratch_dir.unwrap_or_else(|| dir_path.join("scratch"));
-    if strip || strip_only {
+    if use_scratch {
         fs::create_dir_all(&scratch_dir)?;
     }
 
-    let sus_dir = if strip { scratch_dir.join("sus") } else { dir_path.join("sus") };
-    let clean_dir = if strip { scratch_dir.join("clean") } else { dir_path.join("clean") };
+    let sus_dir = if use_scratch { scratch_dir.join("sus") } else { dir_path.join("sus") };
+    let clean_dir = if use_scratch { scratch_dir.join("clean") } else { dir_path.join("clean") };
     if !no_move && !strip_only {
         fs::create_dir_all(&sus_dir)?;
         fs::create_dir_all(&clean_dir)?;
@@ -613,7 +625,11 @@ fn run_bulk_scan(
         println!("Bulk Scan Directory: {}", dir_path.display());
         println!("Found {} demo(s) to analyze", total);
         if strip {
-            println!("Strip mode active: consolecmds will be stripped into '{}' (originals untouched)", scratch_dir.display());
+            if use_scratch {
+                println!("Strip mode active: consolecmds will be stripped into '{}' (originals untouched)", scratch_dir.display());
+            } else {
+                println!("Strip mode active: consolecmds will be stripped directly into TF2 replay directory (no scratch folder used, originals untouched in content)");
+            }
         } else if strip_only {
             println!("Strip-only mode active: consolecmds will be stripped into '{}' (no analysis)", scratch_dir.display());
         }
@@ -629,12 +645,12 @@ fn run_bulk_scan(
             println!("Filtering active: demos from non-Valve servers will not be analysed and count as clean");
         }
         if no_move {
-            if strip {
+            if strip && use_scratch {
                 println!("Mode: In-place scan (stripped demos will remain flat in '{}')", scratch_dir.display());
             } else {
                 println!("Mode: In-place scan (demos will NOT be moved or sorted)");
             }
-        } else if strip {
+        } else if strip && use_scratch {
             println!("Sorting destination: sus/ -> {}, clean/ -> {}", sus_dir.display(), clean_dir.display());
             println!("(Original demos in '{}' remain untouched)", dir_path.display());
         } else {
@@ -656,7 +672,9 @@ fn run_bulk_scan(
                 "clean_demos": []
             });
             if strip || strip_only {
-                res["scratch_directory"] = serde_json::json!(scratch_dir.to_string_lossy());
+                if use_scratch {
+                    res["scratch_directory"] = serde_json::json!(scratch_dir.to_string_lossy());
+                }
                 res["total_consolecmds_stripped"] = serde_json::json!(0);
             }
             println!("{}", if pretty { serde_json::to_string_pretty(&res)? } else { serde_json::to_string(&res)? });
@@ -684,11 +702,12 @@ fn run_bulk_scan(
     // demos being analysed at the same time, so it is silenced during the scan.
     SILENT.store(true, std::sync::atomic::Ordering::Relaxed);
     let next_demo = std::sync::atomic::AtomicUsize::new(0);
-    let scratch_dir_opt = if strip || strip_only {
+    let scratch_dir_opt = if use_scratch {
         Some(scratch_dir.clone())
     } else {
         None
     };
+    let keep_stripped_bytes = strip && replay_creation;
 
     std::thread::scope(|s| {
         let (result_sender, result_receiver) = std::sync::mpsc::channel();
@@ -702,7 +721,7 @@ fn run_bulk_scan(
                 let Some(demo_path) = demo_files.get(index) else {
                     break;
                 };
-                let result = analyse_bulk_demo(demo_path, config, specified_algorithms, strip, strip_only, valve_only, scratch_dir_ref);
+                let result = analyse_bulk_demo(demo_path, config, specified_algorithms, strip, strip_only, valve_only, scratch_dir_ref, keep_stripped_bytes);
                 if result_sender.send((index, result)).is_err() {
                     break;
                 }
@@ -734,8 +753,8 @@ fn run_bulk_scan(
                 .map(|f| f.to_string_lossy().to_string())
                 .unwrap_or_else(|| "unknown.dem".to_string());
 
-            let (analyser, stripped_count) = match result {
-                BulkDemoResult::Analysed { analyser, stripped_count } => {
+            let (analyser, stripped_count, stripped_bytes) = match result {
+                BulkDemoResult::Analysed { analyser, stripped_count, stripped_bytes } => {
                     if !silent {
                         if let Some(sc) = stripped_count {
                             println!("[{}/{}] Stripped {} consolecmds, analyzing {} ...", idx + 1, total, sc, file_name_str);
@@ -749,7 +768,7 @@ fn run_bulk_scan(
                         }
                         partial_demos.push(serde_json::json!({ "demo": file_name_str, "reason": reason }));
                     }
-                    (analyser, stripped_count)
+                    (analyser, stripped_count, stripped_bytes)
                 }
                 BulkDemoResult::StrippedOnly { stripped_count } => {
                     total_consolecmds_stripped += stripped_count;
@@ -767,7 +786,7 @@ fn run_bulk_scan(
                     if let Some(sc) = stripped_count {
                         total_consolecmds_stripped += sc;
                     }
-                    let source_demo_to_move = if strip {
+                    let source_demo_to_move = if use_scratch {
                         scratch_dir.join(&file_name_str)
                     } else {
                         demo_path.clone()
@@ -791,12 +810,12 @@ fn run_bulk_scan(
                         let reason = format!("non-Valve server: {}", shown);
                         println!("[{}/{}] Not analyzing {} ...", idx + 1, total, file_name_str);
                         if no_move {
-                            if strip {
+                            if strip && use_scratch {
                                 println!("CLEAN -> clean (stripped copy in scratch/, {})", reason);
                             } else {
                                 println!("CLEAN -> clean (not moved, {})", reason);
                             }
-                        } else if strip {
+                        } else if strip && use_scratch {
                             println!("CLEAN -> moved to scratch/clean/ ({})", reason);
                         } else {
                             println!("CLEAN -> moved to clean/ ({})", reason);
@@ -882,7 +901,7 @@ fn run_bulk_scan(
                 (&clean_dir, "clean")
             };
 
-            let source_demo_to_move = if strip {
+            let source_demo_to_move = if use_scratch {
                 scratch_dir.join(&file_name_str)
             } else {
                 demo_path.clone()
@@ -906,6 +925,17 @@ fn run_bulk_scan(
                 let mut player_algos: HashMap<u64, Vec<String>> = HashMap::new();
                 for d in &qualifying_detections {
                     player_algos.entry(d.player).or_default().push(d.algorithm.clone());
+                }
+
+                // When strip is run with replay creation, write the stripped demo directly into the replay folder
+                if strip && (replay_old || replay_new) {
+                    if let Some(bytes) = &stripped_bytes {
+                        if let Err(e) = write_stripped_demo_to_replays(&dest_path, bytes) {
+                            if !silent {
+                                println!("       Warning: Failed to write stripped demo to replays folder: {}", e);
+                            }
+                        }
+                    }
                 }
 
                 // Optional replay creation in tf/replay/client/replays
@@ -995,12 +1025,12 @@ fn run_bulk_scan(
                         replay_suffix.push_str(&format!(" [Replay (new) {}]", list.join(", ")));
                     }
                     if no_move {
-                        if strip {
+                        if strip && use_scratch {
                             println!("SUS -> flagged (stripped copy in scratch/){}\n       New suspect(s): {}{}", replay_suffix, player_summaries.join(", "), ignored_suffix);
                         } else {
                             println!("SUS -> flagged (not moved){}\n       New suspect(s): {}{}", replay_suffix, player_summaries.join(", "), ignored_suffix);
                         }
-                    } else if strip {
+                    } else if strip && use_scratch {
                         println!("SUS -> moved to scratch/sus/ as {}{}\n       New suspect(s): {}{}", target_filename, replay_suffix, player_summaries.join(", "), ignored_suffix);
                     } else {
                         println!("SUS -> moved to sus/ as {}{}\n       New suspect(s): {}{}", target_filename, replay_suffix, player_summaries.join(", "), ignored_suffix);
@@ -1037,24 +1067,24 @@ fn run_bulk_scan(
                             format!("all {} detection(s) were from deleted accounts", ignored_deleted_count)
                         };
                         if no_move {
-                            if strip {
+                            if strip && use_scratch {
                                 println!("CLEAN -> clean (stripped copy in scratch/, {})", reason);
                             } else {
                                 println!("CLEAN -> clean (not moved, {})", reason);
                             }
-                        } else if strip {
+                        } else if strip && use_scratch {
                             println!("CLEAN -> moved to scratch/clean/ ({})", reason);
                         } else {
                             println!("CLEAN -> moved to clean/ ({})", reason);
                         }
                     } else {
                         if no_move {
-                            if strip {
+                            if strip && use_scratch {
                                 println!("CLEAN -> clean (stripped copy in scratch/, 0 detections)");
                             } else {
                                 println!("CLEAN -> clean (not moved, 0 detections)");
                             }
-                        } else if strip {
+                        } else if strip && use_scratch {
                             println!("CLEAN -> moved to scratch/clean/ (0 detections)");
                         } else {
                             println!("CLEAN -> moved to clean/ (0 detections)");
@@ -1100,12 +1130,20 @@ fn run_bulk_scan(
             println!("Cleanup: deleted {} json file(s) from '{}'", deleted_jsons, dir_path.display());
         }
         if strip || strip_only {
-            println!(
-                "Bulk Scan Completed in {:.2}s (Stripped {} total consolecmds into '{}')",
-                elapsed,
-                total_consolecmds_stripped,
-                scratch_dir.display()
-            );
+            if use_scratch {
+                println!(
+                    "Bulk Scan Completed in {:.2}s (Stripped {} total consolecmds into '{}')",
+                    elapsed,
+                    total_consolecmds_stripped,
+                    scratch_dir.display()
+                );
+            } else {
+                println!(
+                    "Bulk Scan Completed in {:.2}s (Stripped {} total consolecmds directly into replays)",
+                    elapsed,
+                    total_consolecmds_stripped
+                );
+            }
         } else {
             println!("Bulk Scan Completed in {:.2}s", elapsed);
         }
@@ -1142,7 +1180,9 @@ fn run_bulk_scan(
             "partial_demos": partial_demos
         });
         if strip || strip_only {
-            res["scratch_directory"] = serde_json::json!(scratch_dir.to_string_lossy());
+            if use_scratch {
+                res["scratch_directory"] = serde_json::json!(scratch_dir.to_string_lossy());
+            }
             res["total_consolecmds_stripped"] = serde_json::json!(total_consolecmds_stripped);
         }
         if valve_only {
@@ -1287,7 +1327,7 @@ fn main() -> Result<(), Error> {
     opts.optflag(
         "s",
         "strip",
-        "strip consolecmds from demo(s) into a scratch directory without directly modifying original demos",
+        "strip consolecmds from demo(s) into a scratch directory (or directly into TF2 replay directory when combined with replay creation) without directly modifying original demos",
     );
     opts.optflag(
         "",
@@ -1994,5 +2034,69 @@ mod tests {
 
         let _ = fs::remove_dir_all(&bulk_dir);
     }
-}
 
+    #[test]
+    fn test_strip_with_replay_no_scratch() {
+        let temp_dir = std::env::temp_dir();
+        let run_id = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let root = temp_dir.join(format!("test_replay_strip_{}", run_id));
+        let tf_dir = root.join("tf");
+        let bulk_dir = tf_dir.join("demos");
+        let replays_dir = tf_dir.join("replay").join("client").join("replays");
+        fs::create_dir_all(&bulk_dir).unwrap();
+        fs::create_dir_all(&replays_dir).unwrap();
+
+        let demo_path = bulk_dir.join("demo_sus.dem");
+
+        // Mock demo containing a consolecmd
+        let mut mock_data = vec![0u8; 1072];
+        mock_data[0..8].copy_from_slice(b"HL2DEMO\0");
+        mock_data[8..12].copy_from_slice(&4i32.to_le_bytes());
+        mock_data.push(4); // consolecmd
+        mock_data.extend_from_slice(&10i32.to_le_bytes());
+        mock_data.push(0);
+        mock_data.extend_from_slice(&4i32.to_le_bytes());
+        mock_data.extend_from_slice(b"say\0");
+        mock_data.push(7); // stop
+        fs::write(&demo_path, &mock_data).unwrap();
+
+        // 1. Verify write_stripped_demo_to_replays writes stripped bytes directly into replays_dir
+        let (stripped_bytes, count) = strip_consolecmds_from_bytes(&mock_data).unwrap();
+        assert_eq!(count, 1);
+        let written_target = write_stripped_demo_to_replays(&demo_path, &stripped_bytes).unwrap();
+        assert_eq!(written_target, replays_dir.join("demo_sus.dem"));
+        assert!(written_target.exists());
+        assert_eq!(fs::read(&written_target).unwrap(), stripped_bytes);
+
+        // 2. Verify that run_bulk_scan with strip = true and replay_new = true does NOT create scratch
+        let res = run_bulk_scan(
+            &bulk_dir,
+            &None,
+            &[],
+            &None,
+            false,
+            false,
+            true, // no_move
+            false, // replay_old
+            true,  // replay_new
+            true,  // silent
+            false,
+            true,  // strip
+            false, // strip_only
+            false, // valve_only
+            None,
+            false, // cleanup_jsons
+        );
+        assert!(res.is_ok());
+
+        // CRITICAL CHECK: Scratch directory must NOT exist when running strip with replay creation!
+        let scratch_dir = bulk_dir.join("scratch");
+        assert!(!scratch_dir.exists(), "Scratch directory must NOT be created when running strip with replay creation");
+
+        // Original demo must still exist untouched in content
+        assert!(demo_path.exists());
+        assert_eq!(fs::read(&demo_path).unwrap(), mock_data, "Original demo content must remain intact and unstripped");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+}

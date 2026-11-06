@@ -1346,6 +1346,28 @@ pub fn strip_consolecmds_to_file(input_path: &Path, output_path: &Path) -> Resul
     Ok(count)
 }
 
+/// Writes stripped demo bytes directly into the TF2 replay directory (`tf/replay/client/replays`)
+/// under the same filename as `demo_path`.
+pub fn write_stripped_demo_to_replays(demo_path: &Path, stripped_bytes: &[u8]) -> Result<PathBuf, String> {
+    let replays_dir = find_tf2_replays_dir(demo_path)
+        .ok_or_else(|| "Could not locate TF2 replays folder (tf/replay/client/replays)".to_string())?;
+
+    std::fs::create_dir_all(&replays_dir)
+        .map_err(|e| format!("Failed to create replays directory: {e}"))?;
+
+    let demo_filename = demo_path
+        .file_name()
+        .ok_or_else(|| "Invalid demo path".to_string())?
+        .to_string_lossy()
+        .to_string();
+
+    let target = replays_dir.join(&demo_filename);
+    std::fs::write(&target, stripped_bytes)
+        .map_err(|e| format!("Failed to write stripped demo to replays folder: {e}"))?;
+
+    Ok(target)
+}
+
 /// Converts a demo file into a TF2 replay entry in `tf/replay/client/replays`.
 /// Copies the demo file, sanitizes signon ticks to enable proper seeking,
 /// updates `replays.dmx`, and writes `replay_{handle}.dmx`.
@@ -2147,12 +2169,12 @@ mod tests {
         mock_data.extend_from_slice(&4i32.to_le_bytes()); // len
         mock_data.extend_from_slice(&[20, 21, 22, 23]);
 
-        // Frame 4: cmd 4 (consolecmd), tick 25, slot 0, len 5, payload "+jump "-style bytes
+        // Frame 4: cmd 4 (consolecmd), tick 25, slot 0, len 5, payload "+jump\0"-style bytes
         mock_data.push(4);
         mock_data.extend_from_slice(&25i32.to_le_bytes());
         mock_data.push(0);
         mock_data.extend_from_slice(&5i32.to_le_bytes()); // len
-        mock_data.extend_from_slice(b"jump ");
+        mock_data.extend_from_slice(b"jump\0");
 
         // Frame 5: cmd 7 (stop)
         mock_data.push(7);

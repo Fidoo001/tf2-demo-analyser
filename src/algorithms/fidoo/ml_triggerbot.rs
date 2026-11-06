@@ -384,7 +384,7 @@ impl ShotRecord {
             _ => nan,
         };
         let ready = self.ready_offset();
-        let ready_latency = ready.map_or(nan, |r| ((-r) as f32).clamp(-MAX_READY_LATENCY, MAX_READY_LATENCY));
+        let ready_latency = ready.map_or(nan, |r| (-(r as f32)).clamp(-MAX_READY_LATENCY, MAX_READY_LATENCY));
         // ticks the crosshair already sat on the final aim point while the rifle was ready
         let ready_hold = match ready {
             Some(r) => {
