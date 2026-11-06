@@ -1,6 +1,7 @@
 # TF2 Demo Analyser
 A program used to analyse TF2 demos and detect cheaters. Forked from [nocrex's demo analyser](https://github.com/Nocrex/demo-analysis), which is based on [megascatterbomb's demo analysis template](https://github.com/MegaAntiCheat/analysis-template-rust). It features algorithms used to detect most of the detectable cheat features, a live analysis option to analyse the demo of an ongoing match, party chat warnings through RCON, TF2BD playerlist implementation and many other useful utility features. The algorithms have pretty self-explanatory names, for explanations on individual cheat features, check the relevant channel on discord.
-*The program is split into two separate builds: CLI (command line interface) and GUI (graphical user interface)* 
+
+The program is split into two separate builds: CLI (command line interface) and GUI (graphical user interface)
 
 ## **GUI**
 GUI is the one that you are likely looking for. It includes all of the features needed to analyse and review demos with an easy to use interface.
