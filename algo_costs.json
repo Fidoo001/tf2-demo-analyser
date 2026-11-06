@@ -1,10 +1,5 @@
 {
   "algorithms": {
-    "angle_history": {
-      "ms_per_1k_ticks": 6.181380279456801,
-      "samples": 23,
-      "source_hash": "669e929a24c210b7"
-    },
     "autostrafe": {
       "ms_per_1k_ticks": 5.336245444740244,
       "samples": 3662,
@@ -94,16 +89,6 @@
       "ms_per_1k_ticks": 1.0902447395320212,
       "samples": 293,
       "source_hash": "df73a369d6b06e68"
-    },
-    "nocrex/aimsnap": {
-      "ms_per_1k_ticks": 7.055866343176563,
-      "samples": 24,
-      "source_hash": "6114bfff9daaadc0"
-    },
-    "nocrex/angle_repeat": {
-      "ms_per_1k_ticks": 5.833390720196633,
-      "samples": 23,
-      "source_hash": "6e3afaafe4c848c1"
     },
     "nocrex/oob_pitch": {
       "ms_per_1k_ticks": 0.2886313665889998,
