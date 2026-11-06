@@ -38,3 +38,15 @@ Most false-flag-prone: `fidoo/auto_backstab`, `fidoo/plain_aimbot`,`fidoo/sniper
 ### **ML algorithms**
 These algorithms use machine learning and were trained on ~5k demos from the database. They are very sensitive, so they flag players the standard algorithms miss, and are less prone to false flags. However, they are heavier and always run on the whole demo. They may also flag players and retract the flags later on. Due to this, I recommend not using them during Live scanning or setting the scanning interval to at least 120 seconds. `ml_triggerbot` and `ml_backtrack` are still prone to false flags and *may be improved in the future*, for now they are disabled by default.
 
+
+### **Building from source**
+You need to have cargo installed to build this program from source. 
+There are several optional build features, it is recommended to keep all of them.
+ - parallel - runs multiple workers at once to analyse demos faster
+ - RCON - adds features that use RCON: party chat warnings and live scanning
+ - TF2BD - TF2BD playerlist support, used to mark players with custom playerlist
+
+To build the GUI with all features:
+`cargo build --release --bin gui --features "gui rcon parallel"` 
+To build the CLI:
+`cargo build --release --bin cli --features "parallel"`
