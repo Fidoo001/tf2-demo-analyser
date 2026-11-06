@@ -562,7 +562,7 @@ impl MlAutoBackstab {
     pub fn new() -> Self {
         Self {
             params: Parameters::from([
-                ("enabled".to_string(), Parameter::Bool(false)),
+                ("enabled".to_string(), Parameter::Bool(true)),
                 ("min_score".to_string(), Parameter::Float(0.7)),
                 ("min_stabs".to_string(), Parameter::Int(3)),
                 ("max_detections".to_string(), Parameter::Int(3)),
@@ -688,7 +688,7 @@ fn attack_tick(attacks: &VecDeque<u32>, hurt_tick: u32) -> u32 {
 
 impl<'a> CheatAlgorithm<'a> for MlAutoBackstab {
     fn default(&self) -> bool {
-        false
+        true
     }
 
     fn algorithm_name(&self) -> &str {

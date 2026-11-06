@@ -828,7 +828,7 @@ impl MlSilentAim {
     pub fn new() -> Self {
         Self {
             params: Parameters::from([
-                ("enabled".to_string(), Parameter::Bool(false)),
+                ("enabled".to_string(), Parameter::Bool(true)),
                 ("min_score".to_string(), Parameter::Float(0.83)),
                 ("min_hits".to_string(), Parameter::Int(3)),
                 ("min_shot_score".to_string(), Parameter::Float(0.65)),
@@ -931,7 +931,7 @@ impl MlSilentAim {
 
 impl<'a> CheatAlgorithm<'a> for MlSilentAim {
     fn default(&self) -> bool {
-        false
+        true
     }
 
     fn algorithm_name(&self) -> &str {
