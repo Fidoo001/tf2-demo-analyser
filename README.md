@@ -49,7 +49,7 @@ There are several optional build features, it is recommended to keep all of them
 
 To build the GUI with all features:
 
-`cargo build --release --bin gui --features "gui rcon parallel TF2BD"` 
+`cargo build --release --bin gui --features "gui rcon parallel tf2bd"` 
 
 To build the CLI:
 
