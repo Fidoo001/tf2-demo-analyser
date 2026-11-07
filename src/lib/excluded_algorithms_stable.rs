@@ -10,6 +10,7 @@ pub const STABLE_EXCLUDED_ALGORITHMS: &[&str] = &[
     // Algorithms with 100% accuracy
     "nocrex/oob_pitch",
     "oob_pitch",
+    "skiesred/oob_pitch",
     "fidoo/invalid_equip_region",
     "invalid_equip_region",
 
@@ -26,6 +27,8 @@ pub const STABLE_EXCLUDED_ALGORITHMS: &[&str] = &[
     "ml_silent_aim",
     "fidoo/ml_backtrack",
     "ml_backtrack",
+    "fidoo/ml_autostrafe",
+    "ml_autostrafe",
 ];
 
 /// Returns whether a given algorithm name is in the stable excluded list.
