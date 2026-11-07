@@ -137,8 +137,6 @@ impl<'a, T: DemoHandlerAnalyser> CheatDemoHandler<'a, T> {
                 self.analyser.handle_packet_info(&PacketInfo {
                     tick: packet.tick,
                     signon,
-                    tail_bits: packet.tail_bits,
-                    tail_value: packet.tail_value,
                 });
             }
             Packet::UserCmd(packet) => {

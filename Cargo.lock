@@ -3453,6 +3453,8 @@ checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 [[package]]
 name = "steamid-ng"
 version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ffb049f8faa2cba570c5366dbaf88ee5849725b16edb771848639fac92e33673"
 dependencies = [
  "enum_primitive",
  "lazy_static",
@@ -3601,6 +3603,8 @@ dependencies = [
 [[package]]
 name = "tf-demo-parser"
 version = "0.6.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4bdb0489206a229feeb7e72d161ae8c117116de0eddbca70ce9c50a41f082d07"
 dependencies = [
  "bitbuffer",
  "enumflags2",

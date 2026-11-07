@@ -1,3 +1,0 @@
-whitelisted_functions = [
-  { function_name = "serde_json::ser::format_escaped_str", crate_name = "serde_json" }
-]

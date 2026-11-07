@@ -420,9 +420,6 @@ pub trait CheatAlgorithm<'a> {
 pub struct PacketInfo {
     pub tick: DemoTick,
     pub signon: bool,
-    /// Bits left in the payload after the last message (0..=6) and their value.
-    pub tail_bits: u8,
-    pub tail_value: u8,
 }
 
 #[derive(Serialize, Deserialize, Clone)]

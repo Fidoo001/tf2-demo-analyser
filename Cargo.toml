@@ -61,8 +61,3 @@ required-features = [ "gui" ]
 
 [target.'cfg(windows)'.build-dependencies]
 winres = "0.1"
-
-[patch.crates-io]
-steamid-ng = { path = "vendor/steamid-ng" }
-tf-demo-parser = { path = "vendor/tf-demo-parser" }
-
