@@ -48,8 +48,20 @@ egui = { version = "0.31.1", optional = true }
 rayon = { version = "1.10", optional = true }
 unsafe-libopus = { version = "0.2.0", optional = true }
 
+# The built-in 3D demo player
+bytemuck = { version = "1", features = ["derive"], optional = true }
+glam = { version = "0.30", optional = true }
+image = { version = "0.25", default-features = false, features = ["png", "gif"], optional = true }
+tf-asset-loader = { version = "0.2.0", optional = true }
+vbsp = { version = "0.9.1", optional = true }
+vmdl = { version = "0.2.0", optional = true }
+vtf = { version = "0.4.1", optional = true }
+cpal = { version = "0.15.3", optional = true }
+symphonia = { version = "0.5.4", default-features = false, features = ["mp3"], optional = true }
+
 [features]
-gui = [ "eframe", "egui", "dep:rfd" ]
+gui = [ "eframe", "egui", "dep:rfd", "player" ]
+player = [ "eframe", "egui", "dep:bytemuck", "dep:cpal", "dep:glam", "dep:image", "dep:symphonia", "dep:tf-asset-loader", "dep:unsafe-libopus", "dep:vbsp", "dep:vmdl", "dep:vtf" ]
 experimental = [ "dep:unsafe-libopus" ]
 parallel = [ "dep:rayon" ]
 rcon = [ "gui" ]
@@ -58,6 +70,10 @@ tf2bd = []
 [[bin]]
 name = "gui"
 required-features = [ "gui" ]
+
+[[bin]]
+name = "player_preview"
+required-features = [ "player" ]
 
 [target.'cfg(windows)'.build-dependencies]
 winres = "0.1"

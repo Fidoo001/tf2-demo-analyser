@@ -22,6 +22,25 @@ use analysis_template::rcon::{
 };
 #[cfg(feature = "tf2bd")]
 use analysis_template::{tf2bd::Tf2bdSettings, tf2bd_view::Tf2bdUi};
+use analysis_template::player::{DemoPlayer, Marker, OpenRequest, PlayerRequest};
+
+/// The original project this version is built on, and the commit last merged from it.
+const UPSTREAM_REPO: &str = "Fidoo001/tf2-demo-analyser";
+const UPSTREAM_MERGED: &str = "2c17d9e223348b7dbccb5f7645d0a359d54fd574";
+
+/// How many commits the original project's main branch is ahead of the merged one,
+/// from GitHub's public API. None when GitHub can't be reached.
+fn upstream_changes_since_merge() -> Option<u32> {
+    let url = format!("https://api.github.com/repos/{UPSTREAM_REPO}/compare/{UPSTREAM_MERGED}...main");
+    let response = ureq::get(&url)
+        .set("User-Agent", "demo-analysis-update-check")
+        .set("Accept", "application/vnd.github+json")
+        .timeout(std::time::Duration::from_secs(10))
+        .call()
+        .ok()?;
+    let body: serde_json::Value = serde_json::from_str(&response.into_string().ok()?).ok()?;
+    body.get("ahead_by")?.as_u64().and_then(|ahead| u32::try_from(ahead).ok())
+}
 use eframe::egui;
 use itertools::Itertools;
 use steamid_ng::SteamID;
@@ -503,6 +522,11 @@ struct Gui {
     hovered_player: Option<u64>,
     reported_ids: HashSet<u64>,
 
+    /// The built-in 3D player, while it's open.
+    player: Option<DemoPlayer>,
+    /// Scripted input for retaking the user guide's screenshots (DEMO_ANALYSIS_SCRIPT).
+    script: Option<analysis_template::player::Script>,
+
     copied_demo_feedback: Option<std::time::Instant>,
     copied_detections_feedback: Option<std::time::Instant>,
     replay_feedback: Option<(std::time::Instant, Result<usize, String>)>,
@@ -568,6 +592,9 @@ struct Gui {
     send: std::sync::mpsc::Sender<anyhow::Result<CheatAnalyser<'static>>>,
     analysis_job_send: std::sync::mpsc::Sender<AnalysisJob>,
     reported_ids_recv: std::sync::mpsc::Receiver<HashSet<u64>>,
+    /// How many changes Fidoo001's original project has had since this version was merged.
+    upstream_recv: std::sync::mpsc::Receiver<u32>,
+    upstream_ahead: Option<u32>,
 
     account_status: HashMap<u64, AccountStatus>,
     deleted_accounts: HashSet<u64>,
@@ -963,6 +990,14 @@ impl Gui {
             }
         }
 
+        // Ask GitHub, once, whether the original project has changed since this version was merged.
+        let (upstream_send, upstream_recv) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            if let Some(ahead) = upstream_changes_since_merge() {
+                let _ = upstream_send.send(ahead);
+            }
+        });
+
         // Spawn background thread to download reported cheater IDs without blocking GUI
         let (reported_send, reported_ids_recv) = std::sync::mpsc::channel();
         let thread_reported_path = reported_path.clone();
@@ -1211,6 +1246,8 @@ impl Gui {
             selected_detection: None,
             hovered_player: None,
             reported_ids: initial_reported_ids,
+            player: None,
+            script: analysis_template::player::Script::from_env(),
             copied_demo_feedback: None,
             copied_detections_feedback: None,
             replay_feedback: None,
@@ -1264,6 +1301,8 @@ impl Gui {
             send,
             analysis_job_send,
             reported_ids_recv,
+            upstream_recv,
+            upstream_ahead: None,
             account_status: HashMap::new(),
             deleted_accounts: HashSet::new(),
             existing_accounts: HashSet::new(),
@@ -1893,8 +1932,30 @@ impl Gui {
         Some(LiveRescan::new(guard, hidden))
     }
 
+    /// Opens the loaded demo in the 3D player, marking every detection on its timeline.
+    fn open_player(&mut self, tick: Option<u32>, steam_id: Option<u64>) {
+        let Some(demo) = self.file.clone() else { return };
+        let mut markers: Vec<Marker> = self
+            .detections
+            .values()
+            .flatten()
+            .map(|detection| Marker {
+                tick: detection.tick,
+                label: detection.algorithm.clone(),
+                steam_id: detection.player,
+                check: detection.algorithm.clone(),
+                data: detection.data.clone(),
+            })
+            .collect();
+        markers.sort_by_key(|marker| marker.tick);
+        self.player = Some(DemoPlayer::open(OpenRequest { demo, tick, steam_id, markers }));
+    }
+
     pub fn update_ui(&mut self, ctx: &egui::Context) {
 
+        while let Ok(ahead) = self.upstream_recv.try_recv() {
+            self.upstream_ahead = Some(ahead);
+        }
         while let Ok(ids) = self.reported_ids_recv.try_recv() {
             #[cfg(feature = "rcon")]
             if let Ok(mut shared) = self.rt_reported_ids.lock() {
@@ -2689,6 +2750,15 @@ impl Gui {
             });
             ui.add_space(10.0);
             ui.horizontal(|ui| {
+                if let Some(ahead) = self.upstream_ahead.filter(|&ahead| ahead > 0) {
+                    let text = if ahead == 1 { "1 upstream update".to_string() } else { format!("{ahead} upstream updates") };
+                    ui.hyperlink_to(
+                        egui::RichText::new(text).color(egui::Color32::from_rgb(240, 190, 80)),
+                        format!("https://github.com/{UPSTREAM_REPO}/compare/{UPSTREAM_MERGED}...main"),
+                    )
+                    .on_hover_text("Fidoo001's original project has changed since this version was made. Click to see what changed, then ask to merge the update.");
+                    ui.separator();
+                }
                 if ui.add_enabled(!self.processing, egui::Button::new("Open...")).clicked() {
                     if let Some(path) = rfd::FileDialog::new()
                         .add_filter("Demos", &["dem"])
@@ -2869,6 +2939,12 @@ impl Gui {
                                 self.copied_demo_feedback = Some(std::time::Instant::now());
                             }
                         }
+                    }
+                    let watch_btn = ui
+                        .button("▶ Watch demo")
+                        .on_hover_text("Play this demo in 3D here. TF2 needs to be installed, but it won't open");
+                    if watch_btn.clicked() {
+                        self.open_player(None, None);
                     }
                     let use_old_replay = self.use_old_replay_conversion();
                     let replay_btn_text = match &self.replay_feedback {
@@ -3214,6 +3290,7 @@ impl Gui {
                         });
                     });
                 ui.separator();
+                let mut watch_detection = None;
                 egui::ScrollArea::vertical()
                     .id_salt("detections")
                     .show(ui, |ui| {
@@ -3222,17 +3299,28 @@ impl Gui {
                                 self.selected_player.and_then(|p| self.detections.get(&p))
                             {
                                 for (i, det) in detections.iter().enumerate() {
-                                    let resp = ui.selectable_label(
-                                        self.selected_detection.is_some_and(|si| si == i),
-                                        format!("{}: {}", det.tick, det.algorithm),
-                                    );
-                                    if resp.clicked() {
-                                        self.selected_detection = Some(i);
-                                    }
+                                    ui.horizontal(|ui| {
+                                        let watch = ui
+                                            .small_button("▶")
+                                            .on_hover_text("Watch this moment through this player's eyes");
+                                        if watch.clicked() {
+                                            watch_detection = Some((det.tick, det.player));
+                                        }
+                                        let resp = ui.selectable_label(
+                                            self.selected_detection.is_some_and(|si| si == i),
+                                            format!("{}: {}", det.tick, det.algorithm),
+                                        );
+                                        if resp.clicked() {
+                                            self.selected_detection = Some(i);
+                                        }
+                                    });
                                 }
                             }
                         });
                     });
+                if let Some((tick, player)) = watch_detection {
+                    self.open_player(Some(tick), Some(player));
+                }
                 ui.separator();
                 let right_margin = 8.0;
                 let available_for_details = (ui.ctx().screen_rect().max.x - right_margin - ui.cursor().min.x).max(50.0);
@@ -3363,7 +3451,38 @@ including the takes generated for the replays?");
 }
 
 impl eframe::App for Gui {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        if let Some(script) = &mut self.script {
+            script.feed(ctx, raw_input);
+        }
+    }
+
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        if let Some(player) = &mut self.player {
+            let marks = self
+                .tf2bd
+                .tags()
+                .iter()
+                .map(|(steam_id, tag)| (*steam_id, (tag.label.clone(), tag.color)))
+                .collect();
+            player.set_marks(marks, self.tf2bd.enabled());
+            let keep_open = player.show(ctx);
+            for request in player.take_requests() {
+                match request {
+                    PlayerRequest::Mark { steam_id, name } => self.tf2bd.open_mark(steam_id, &name),
+                }
+            }
+            if keep_open {
+                // TF2BD's dialogs draw over the player.
+                self.tf2bd.poll(ctx);
+                self.tf2bd.show(ctx);
+                return;
+            }
+            if let Some(gl) = frame.gl() {
+                player.destroy(gl);
+            }
+            self.player = None;
+        }
         self.update_ui(ctx);
     }
 }

@@ -73,6 +73,7 @@ pub fn algorithm_tooltip(name: &str) -> Option<&'static str> {
         "fidoo/silent_aim" => Some("Detects silent aim snapbacks (A -> B -> C flick-and-return) where view angles snap to a target on the attack tick and instantly restore."),
         "fidoo/sniperaim" => Some("Detects low-FOV Sniper aimbots on scoped rifle shots by analyzing sniper laser dot movement and headshot angle jumps."),
         "nocrex/oob_pitch" => Some("Detects out-of-bounds pitch angles outside [-89°, +89°] (anti-aim / upside-down pitch) that distort player hitboxes."),
+        "skiesred/oob_pitch" => Some("Detects out-of-bounds pitch angles outside [-89°, +89°] (anti-aim / anti-backstab) that distort player hitboxes."),
         "angle_history" => Some("Detects 1-tick aimbot flick-and-return snapbacks using historical viewangle comparisons across ticks."),
         "nocrex/aimsnap" => Some("Detects large, unnatural single-tick angular snaps towards target hitboxes."),
         "nocrex/angle_repeat" => Some("Detects identical repeating viewangles that indicate mechanical or scripted mouse movements."),
