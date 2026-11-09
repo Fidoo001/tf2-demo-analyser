@@ -8,7 +8,7 @@
 //!
 //! `examples/dump_ml_autostrafe_features.rs` dumps the features for model training and extraction.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::f32::consts::PI;
 use std::sync::OnceLock;
 

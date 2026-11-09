@@ -29,6 +29,8 @@ pub const STABLE_EXCLUDED_ALGORITHMS: &[&str] = &[
     "ml_backtrack",
     "fidoo/ml_autostrafe",
     "ml_autostrafe",
+    "fidoo/ml_plain_projectile",
+    "ml_plain_projectile",
 ];
 
 /// Returns whether a given algorithm name is in the stable excluded list.

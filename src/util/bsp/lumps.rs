@@ -9,8 +9,8 @@ pub const LUMP_LEAFS: usize = 10;
 pub const LUMP_LEAFBRUSHES: usize = 17;
 pub const LUMP_BRUSHES: usize = 18;
 pub const LUMP_BRUSHSIDES: usize = 19;
-pub const LUMP_TEXDATA_STRING_TABLE: usize = 43;
-pub const LUMP_TEXDATA_STRING_DATA: usize = 44;
+pub const LUMP_TEXDATA_STRING_DATA: usize = 43;
+pub const LUMP_TEXDATA_STRING_TABLE: usize = 44;
 
 // Content Flags (from Source SDK public/bspflags.h)
 pub const CONTENTS_SOLID: i32 = 0x1;
