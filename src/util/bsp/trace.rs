@@ -57,6 +57,35 @@ pub struct BspCollisionData {
 }
 
 impl BspCollisionData {
+    fn check_side_transparency(&self, side_idx: usize) -> Option<SightlineStatus> {
+        if side_idx < self.brushsides.len() {
+            let side = &self.brushsides[side_idx];
+            let texinfo_idx = side.texinfo as usize;
+            if texinfo_idx < self.texinfo.len() {
+                let ti = &self.texinfo[texinfo_idx];
+                if (ti.flags & SURF_TRANS) != 0 {
+                    return Some(SightlineStatus::BlockedByTransparentWindow);
+                }
+
+                let texdata_idx = ti.texdata as usize;
+                if texdata_idx < self.texdata.len() {
+                    let td = &self.texdata[texdata_idx];
+                    let str_id = td.name_string_table_id as usize;
+                    if str_id < self.material_names.len() {
+                        let mat = self.material_names[str_id].to_ascii_lowercase();
+                        if mat.contains("glass") || mat.contains("window") {
+                            return Some(SightlineStatus::BlockedByTransparentWindow);
+                        }
+                        if mat.contains("grate") || mat.contains("fence") {
+                            return Some(SightlineStatus::BlockedByGrate);
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Determines whether a brush represents a transparent window/glass, a grate, or an opaque solid.
     fn classify_brush(&self, brush: &Brush, hit_side_idx: Option<usize>) -> SightlineStatus {
         // 1. Check for wire fence / grate
@@ -71,34 +100,22 @@ impl BspCollisionData {
 
         // 3. Inspect surface flags and texture name of the hit brushside
         if let Some(side_idx) = hit_side_idx {
-            if side_idx < self.brushsides.len() {
-                let side = &self.brushsides[side_idx];
-                let texinfo_idx = side.texinfo as usize;
-                if texinfo_idx < self.texinfo.len() {
-                    let ti = &self.texinfo[texinfo_idx];
-                    if (ti.flags & SURF_TRANS) != 0 {
-                        return SightlineStatus::BlockedByTransparentWindow;
-                    }
-
-                    let texdata_idx = ti.texdata as usize;
-                    if texdata_idx < self.texdata.len() {
-                        let td = &self.texdata[texdata_idx];
-                        let str_id = td.name_string_table_id as usize;
-                        if str_id < self.material_names.len() {
-                            let mat = self.material_names[str_id].to_ascii_lowercase();
-                            if mat.contains("glass") || mat.contains("window") {
-                                return SightlineStatus::BlockedByTransparentWindow;
-                            }
-                            if mat.contains("grate") || mat.contains("fence") {
-                                return SightlineStatus::BlockedByGrate;
-                            }
-                        }
-                    }
-                }
+            if let Some(status) = self.check_side_transparency(side_idx) {
+                return status;
             }
         }
 
-        // 4. Solid or opaque
+        // 4. If hit side was nodraw or didn't match, check all brush sides
+        let first_side = brush.first_side as usize;
+        let num_sides = brush.num_sides as usize;
+        for s in 0..num_sides {
+            let side_idx = first_side + s;
+            if let Some(status) = self.check_side_transparency(side_idx) {
+                return status;
+            }
+        }
+
+        // 5. Solid or opaque
         if (brush.contents & (CONTENTS_SOLID | CONTENTS_OPAQUE | CONTENTS_PLAYERCLIP)) != 0 {
             return SightlineStatus::BlockedByOpaqueWall;
         }
@@ -136,14 +153,10 @@ impl BspCollisionData {
             t_end: 1.0,
         });
 
-        let mut earliest_hit_frac = 1.0f32;
-        let mut earliest_hit_status = SightlineStatus::Clear;
+        let mut hit_window = false;
+        let mut hit_grate = false;
 
         while let Some(entry) = stack.pop() {
-            if entry.t_start >= earliest_hit_frac {
-                continue;
-            }
-
             if entry.node_idx < 0 {
                 // Leaf reached
                 let leaf_idx = (-entry.node_idx - 1) as usize;
@@ -233,12 +246,20 @@ impl BspCollisionData {
                             }
                         }
 
-                        if starts_out && enter_frac < exit_frac && enter_frac >= 0.0 && enter_frac < earliest_hit_frac {
-                            earliest_hit_frac = enter_frac;
-                            earliest_hit_status = self.classify_brush(brush, hit_side_idx);
-                            if earliest_hit_status == SightlineStatus::BlockedByOpaqueWall {
-                                // Opaque wall stops sightline completely
-                                return SightlineStatus::BlockedByOpaqueWall;
+                        if starts_out && enter_frac < exit_frac && enter_frac >= 0.0 && enter_frac < 1.0 {
+                            let status = self.classify_brush(brush, hit_side_idx);
+                            match status {
+                                SightlineStatus::BlockedByOpaqueWall => {
+                                    // Opaque wall stops sightline completely
+                                    return SightlineStatus::BlockedByOpaqueWall;
+                                }
+                                SightlineStatus::BlockedByTransparentWindow => {
+                                    hit_window = true;
+                                }
+                                SightlineStatus::BlockedByGrate => {
+                                    hit_grate = true;
+                                }
+                                SightlineStatus::Clear => {}
                             }
                         }
                     }
@@ -316,7 +337,13 @@ impl BspCollisionData {
             }
         }
 
-        earliest_hit_status
+        if hit_window {
+            SightlineStatus::BlockedByTransparentWindow
+        } else if hit_grate {
+            SightlineStatus::BlockedByGrate
+        } else {
+            SightlineStatus::Clear
+        }
     }
 
     /// Sweeps an axis-aligned box (`mins`/`maxs` relative to the origin) from `start` to `end` through
