@@ -1,0 +1,229 @@
+DEMO ANALYSIS WITH 3D PLAYER - CHANGES
+======================================
+
+This is a modified version of Demo Analysis by Fidoo001 and
+contributors (https://github.com/Fidoo001/tf2-demo-analyser), which is
+licensed under the GNU GPL version 3. This file lists everything this
+version changes compared with the original at commit 2c17d9e
+(7 November 2026).
+
+In short: it adds a built-in 3D demo player, so you can watch any
+detection without opening TF2. No detection check was added, removed or
+changed. Every check, and what it finds, is the original's.
+
+
+WHAT'S DIFFERENT
+----------------
+
+Watching demos in 3D (new)
+  - "Watch demo" in the main window plays the whole demo, with every
+    detection marked on the timeline. The play button next to a
+    detection jumps to 3 seconds before it, through that player's eyes.
+  - The match is rebuilt from the demo file and TF2's installed game
+    files: the real map with its textures, lighting, props and sky,
+    TF2's class models and weapons, and rockets, stickies, buildings,
+    doors, carts and pickups. TF2 has to be installed but never opens.
+    Cosmetics and hats are left out on purpose.
+  - Watch through any player's eyes, with their hands and weapon firing,
+    reloading and switching like in TF2, TF2's crosshair, and the Sniper
+    scope when they zoom in. Or watch them in third person, from behind,
+    and drag to swing the camera around them like spectating. Or fly a
+    free camera.
+  - Animations come from TF2's own files: running, crouching, jumping,
+    a pose for each weapon (picked from TF2's item list), aiming,
+    shooting, melee swings, reloads and TF2's death animations. They
+    blend into each other the way TF2's do.
+  - Dead players fall as ragdolls, thrown by the killing blow, and land
+    on the map. Sentries turn to aim and fire, and buildings play their
+    build animations.
+  - Kill feed, chat, and a player list with class, health and the
+    scoreboard ping of every player at the moment you're watching.
+
+Seeing what a check saw (new, in the Show... menu)
+  - Bullet lines and projectile trails (T), bullet impacts and damage
+    numbers.
+  - Team glow through walls: everyone, enemies, teammates or off (G).
+  - Aim lines from every player's eyes (A), TF2's real hitboxes (H),
+    and backtrack ghosts, which show where the server puts enemies when
+    it judges the watched player's shots.
+  - Aim graph: how fast the watched player's view turns, with their
+    shots, hits and detections marked. An aimbot snap shows as one tall
+    spike.
+  - Aimbot FOV circle: for a flagged player, a circle around the
+    crosshair as big as the biggest flick in their aim detections.
+
+Sound (new)
+  - The 3D player plays the match's sound from TF2's own sound files:
+    guns, rockets, explosions, footsteps, voice lines, sentries, pickups
+    and doors, quieter with distance and from the side they happen on.
+    Voice chat from the demo plays too, with who's talking shown on
+    screen. Volume and mute (M) are in the top bar; hit and kill sounds
+    and voice chat can be turned off in the Show... menu.
+
+Review mode (new)
+  - Pick a player and the 3D player plays each of their detections in
+    turn: slow motion from their eyes, a pause on the flagged moment,
+    then a little after. A bar says which check fired, what to look for
+    on screen, and what the check measured in plain words (angles,
+    distances, ticks, scores and the target's name).
+
+Reporting (new)
+  - Right-click a player in the 3D player to export an HTML report
+    (detections, kills, damage, accuracy and a ping chart), mark them
+    in your TF2BD lists, open their Steam profile or copy their
+    SteamID64.
+  - Save clip... saves 5, 10 or 20 seconds around the current moment as
+    an MP4 (needs ffmpeg) or a GIF.
+
+Main window
+  - The TF2BD Community Biglist and TF2BD Trusted lists are the default
+    TF2BD playerlists. Configure playerlists has buttons to add them
+    back if you remove them.
+  - It tells you when Fidoo001's project has new changes ("N upstream
+    updates" next to Open...).
+  - Fixed: the skiesred/oob_pitch check had no tooltip, which made one
+    of the original's own tests fail. It now has one.
+
+
+HISTORY (newest first)
+----------------------
+
+9 November 2026.
+  - Added review mode.
+  - Added aim lines, hitboxes, backtrack ghosts, the aim graph, damage
+    numbers, bullet impacts and the Show... menu.
+  - Added Save clip..., player reports, marking in TF2BD from the 3D
+    player, and the update check.
+  - Added shooting, melee and reload animations. Jumps now start exactly
+    when the jump key was pressed.
+  - Fixed: the Heavy's minigun in first person now sits low on the
+    right with the barrel forward. This is an approximation, because
+    TF2's own first-person animation stands it on end.
+  - Fixed: the arrow keys in the key hints showed as boxes.
+  - Fixed animations: a reload or swing no longer carries over after a
+    weapon switch, or plays on a weapon that has none (like a shotgun
+    reload on a carried building). A scoped Sniper uses TF2's scoped
+    fire and reload. Alternate attacks (the Pyro's airblast, the Spy's
+    backstab, the Heavy's other fist, the Sandman's ball) use their own
+    animations. Normal jumps no longer look like blast jumps, and a
+    player with no class yet is no longer drawn as a pillar.
+  - Movement animations now blend into each other over 0.2 seconds
+    instead of snapping when someone stops, lands or crouches.
+  - Dead bodies are ragdolls instead of all playing the same frozen
+    animation. Explosions throw them; bullets and melee knock them
+    back. Headshots, backstabs and burning deaths keep TF2's own
+    death animations.
+  - Sentries turn and tilt to aim where the server says they aimed,
+    sentries, dispensers and teleporters play their build animations,
+    and teleporters spin when ready.
+  - Fixed: bullet lines, impacts, aim lines and bodies passed through
+    terrain (hills, rocky ground) and solid brush objects like bridges.
+  - First person: everyone's hands now draw, fire, swing and reload with
+    TF2's own first-person animations, a revved minigun spins, and the
+    weapon trails behind quick turns and tucks in when looking up or
+    down, as in TF2. Before, only the recording player's hands moved.
+  - Sentries play their firing animation, with a muzzle flash and a
+    bullet line to what they're shooting at.
+  - Fixed bullet lines: they started at the shooter's eyes, so in third
+    person they came out of their head. They now start at the gun's
+    muzzle, as in TF2, and a bullet that hit a player stops at them
+    instead of carrying on through to the wall behind.
+  - Added an aimbot FOV estimate for flagged players: the biggest flick
+    onto a target among their aim detections, which their aimbot
+    reaches at least. It shows as a circle around the crosshair when
+    watching them (Show... > Aimbot FOV circle), in review mode and in
+    player reports.
+  - Added a user guide, GUIDE.md, with screenshots of the main window,
+    the 3D player, its menus, review mode, reports and clips.
+  - Fixed projectiles: the Righteous Bison's and the Pomson's shots were
+    drawn in the wrong place, and the Sandman's ball and the Wrap
+    Assassin's ornament weren't drawn at all. Energy shots (Bison, Pomson,
+    Cow Mangler, Short Circuit) now glow in their team's colour and the
+    Dragon's Fury's fireballs glow orange, as in TF2, with trails to match.
+    Trails also stop short of the camera, so a shot the watched player
+    just fired no longer draws a line across the whole screen.
+  - Fixed: demos on some community maps wouldn't open ("damaged"),
+    because of a map model whose animations are kept in a separate file.
+  - Added third person: watch a player from behind (First person / Third
+    person next to View, or C), drag to swing the camera around them like
+    spectating, scroll to zoom, double-click to go back behind them.
+  - Added sound: the demo's own sounds (what the recording player's game
+    heard), explosions, the recording player's own shots and swings,
+    TF2's hit and kill sounds for the watched player, and voice chat.
+  - The timeline follows the player you watch: a bar along its bottom
+    shows when the demo has them (green alive, grey dead, empty while
+    they're out of the recorder's view), and it shows only their kills and
+    deaths ("Only their kills and deaths" in the bottom bar). Hovering a
+    kill on the timeline names who killed whom with what.
+
+8 November 2026
+  - Updated to Fidoo001's latest code (commit 2c17d9e), which brought
+    their machine-learning checks, their fixes and the GPL-3.0 license.
+  - Added the ping column to the 3D player's player list.
+  - Turned the lmao/ checks off by default.
+
+7 November 2026
+  - Added the built-in 3D demo player.
+  - Fixed black and upside-down views, missing floors, the map's
+    backdrop drawn too small, hidden map pieces being drawn, some
+    textures not loading, and feet sliding while walking.
+  - Added TF2's death animations, map objects the demo never sent, and
+    the Sniper scope view.
+  - Added hands, weapons and the crosshair in first person. Worn items
+    such as the Pyro's Thermal Thruster no longer cover the view.
+  - Added bullet lines and projectile trails, with on/off switches.
+  - Fixed terrain lighting and added the maps' baked lighting on props.
+    Fixed Spy and Demoman weapon poses, jumps and aiming stances.
+  - Added team glow through walls.
+  - Added the TF2BD community lists as defaults.
+  - Added the lmao/ checks, ported from titanium_machine's
+    Cheater_Detection (removed again on 9 November).
+  - Made the first shareable zip.
+
+
+FILES
+-----
+
+New
+  src/player/                the 3D player:
+    view.rs                  the player window, controls, overlays
+                             and review mode
+    recording.rs             reads the demo into a timeline
+    map.rs                   loads the map, its lighting and props
+    renderer.rs              draws the map, models, glow and traces
+    skeleton.rs              skeletons, animations and hitboxes
+    characters.rs            class models and weapons
+    assets.rs                reads TF2's game files
+    items.rs                 weapon poses from TF2's item list
+    report.rs                player reports
+    clip.rs                  saving clips
+    review.rs                review mode's grouping and plain words
+    ragdoll.rs               dead bodies falling as ragdolls
+    script.rs                scripted clicks and keys that take the
+                             guide's screenshots (DEMO_ANALYSIS_SCRIPT)
+    audio.rs                 playing sounds: decoding and mixing
+    demo_sounds.rs           reading the sounds a demo carries
+    mod.rs                   lists the files above
+  src/bin/player_preview.rs  a developer tool that saves screenshots
+                             and photographs every pose in a demo
+  GUIDE.md                   the user guide
+  docs/images/               the guide's screenshots
+
+Changed
+  Cargo.toml                 the 3D player's libraries (including cpal
+                             for sound output and symphonia for MP3)
+                             and its "player" feature
+  Cargo.lock                 the exact versions of those libraries
+  src/lib.rs                 adds the 3D player, and builds voice chat
+                             decoding (src/util/voice.rs) for it too,
+                             not only for the experimental build
+  src/bin/gui.rs             Watch demo buttons, opening the player,
+                             marking in TF2BD from the player, the
+                             update check, and scripted input for the
+                             guide's screenshots
+  src/tf2bd.rs               the community lists as defaults
+  src/tf2bd_view.rs          buttons to add the community lists
+  src/lib/algorithm.rs       the missing skiesred/oob_pitch tooltip
+
+Everything else, including every check in src/algorithms/, is the
+original's.

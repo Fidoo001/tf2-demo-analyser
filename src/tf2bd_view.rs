@@ -332,6 +332,7 @@ impl Tf2bdUi {
         let mut browse = false;
         let mut create = false;
         let mut reload = false;
+        let mut suggested: Option<&str> = None;
         let mut open = true;
         egui::Window::new("Playerlists")
             .open(&mut open)
@@ -395,6 +396,19 @@ impl Tf2bdUi {
                 }
             });
             ui.horizontal(|ui| {
+                ui.weak("Community lists:");
+                for (name, url) in crate::tf2bd::SUGGESTED_PLAYERLISTS {
+                    let added = self.settings.playerlists.iter().any(|source| source == url);
+                    if ui
+                        .add_enabled(!added, egui::Button::new(format!("+ {name}")))
+                        .on_hover_text(url)
+                        .clicked()
+                    {
+                        suggested = Some(url);
+                    }
+                }
+            });
+            ui.horizontal(|ui| {
                 if ui.button("Create new local playerlist...").clicked() {
                     create = true;
                 }
@@ -417,6 +431,9 @@ impl Tf2bdUi {
             }
         });
 
+        if let Some(url) = suggested {
+            self.add_source(url);
+        }
         if let Some(i) = remove {
             let source = self.lists.remove(i).source;
             self.settings.playerlists.retain(|s| *s != source);

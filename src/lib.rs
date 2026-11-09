@@ -7,6 +7,8 @@ pub mod base {
 pub mod header_view;
 pub mod playerlist_view;
 pub mod chat_view;
+#[cfg(feature = "player")]
+pub mod player;
 #[cfg(feature = "rcon")]
 pub mod rcon;
 #[cfg(feature = "tf2bd")]
@@ -30,7 +32,7 @@ pub mod util {
     pub mod datatable_validator;
     pub mod helpers;
     pub mod schema_equip_regions;
-    #[cfg(feature = "experimental")]
+    #[cfg(any(feature = "experimental", feature = "player"))]
     pub mod voice;
     pub mod nocrex {
         pub mod jankguard;

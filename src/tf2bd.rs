@@ -68,6 +68,16 @@ pub fn default_attribute_color(name: &str) -> [u8; 3] {
     }
 }
 
+/// Public TF2BD playerlists offered in the playerlist settings, and used until the user picks
+/// their own: (name, URL).
+pub const SUGGESTED_PLAYERLISTS: [(&str, &str); 2] = [
+    (
+        "TF2BD Community Biglist (bots)",
+        "https://gist.githubusercontent.com/wgetJane/0bc01bd46d7695362253c5a2fa49f2e9/raw/playerlist.biglist.json",
+    ),
+    ("TF2BD Trusted (cheaters)", "https://trusted.roto.lol/v1/steamids"),
+];
+
 /// The `tf2bd` section of params.json.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Tf2bdSettings {
@@ -106,9 +116,13 @@ impl Tf2bdSettings {
             _ => None,
         };
         let enabled = matches!(params.get(Self::ENABLED_KEY), Some(Parameter::Bool(true)));
-        let mut playerlists: Vec<String> = json_list(Self::PLAYERLISTS_KEY)
-            .and_then(|v| serde_json::from_value(v).ok())
-            .unwrap_or_default();
+        // Until playerlists are saved, the suggested community lists are used.
+        let mut playerlists: Vec<String> = match params.get(Self::PLAYERLISTS_KEY) {
+            None => SUGGESTED_PLAYERLISTS.iter().map(|(_, url)| url.to_string()).collect(),
+            Some(_) => json_list(Self::PLAYERLISTS_KEY)
+                .and_then(|v| serde_json::from_value(v).ok())
+                .unwrap_or_default(),
+        };
         playerlists.retain(|s| !s.trim().is_empty());
         let mut seen = HashSet::new();
         playerlists.retain(|s| seen.insert(s.clone()));
@@ -122,7 +136,10 @@ impl Tf2bdSettings {
     }
 
     pub fn from_config(config: &HashMap<String, Parameters>) -> Self {
-        config.get(Self::SECTION).map(Self::from_parameters).unwrap_or_default()
+        config
+            .get(Self::SECTION)
+            .map(Self::from_parameters)
+            .unwrap_or_else(|| Self::from_parameters(&HashMap::new()))
     }
 
     pub fn attribute(&self, name: &str) -> Option<&AttributeSetting> {
@@ -470,6 +487,18 @@ pub fn found_attributes(lists: &[LoadedPlayerlist]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_community_lists_are_used_until_playerlists_are_saved() {
+        let fresh = Tf2bdSettings::from_config(&HashMap::new());
+        let suggested: Vec<String> = SUGGESTED_PLAYERLISTS.iter().map(|(_, url)| url.to_string()).collect();
+        assert_eq!(fresh.playerlists, suggested);
+        assert!(!fresh.enabled, "TF2BD itself stays off until turned on");
+
+        // Once the user saves their own choice, even an empty one, it's kept.
+        let saved = Tf2bdSettings { playerlists: Vec::new(), ..fresh };
+        assert!(Tf2bdSettings::from_parameters(&saved.to_parameters()).playerlists.is_empty());
+    }
 
     const LIST: &str = r#"{
         "$schema": "x",
