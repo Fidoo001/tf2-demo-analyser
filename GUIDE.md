@@ -66,7 +66,7 @@ Right-click a flagged player for more: view them in the playerlist, copy their S
 
 ![Right-clicking a flagged player in the main window](docs/images/main-right-click.png)
 
-When Fidoo001's original project has new changes, **N upstream updates** shows next to Open... .
+**Updates.** When a newer build is released, **Update available** shows next to Open... . Click it to download the new version, check it against its published checksum and restart. Your settings, reports and clips stay, and the version you had is kept next to it as `Demo Analysis (previous).exe`, in case you want to go back. New builds bring in Fidoo001's changes to the detection checks: a robot on the GitHub repository checks his project every day, and his changes are released once they pass the tests and are merged. Until then, **N upstream updates** next to Open... shows that he has changed something; click it to see what.
 
 ## The 3D player at a glance
 
@@ -263,6 +263,7 @@ The program keeps everything next to itself, so the folder can be moved or delet
 | No MP4 option when saving a clip | Install [ffmpeg](https://ffmpeg.org) so the program can find it, or save a GIF. |
 | "Mark in TF2BD..." is greyed out | Tick **Enable TF2BD features** in the TF2BD settings of the main window. |
 | No aimbot FOV circle | The watched player has no aim detections, or the circle is off in **Show...**. |
+| "Update available" fails | The message says why; your current version keeps working. You can also download the zip from the [releases page](https://github.com/wombo14/tf2-demo-analyser/releases/latest). |
 | No sound | Check that **Sound** isn't at zero or muted (M), and that you're playing at 2x or slower. "No sound device" in the top bar means Windows has no speakers or headphones to play to. |
 
 **Credits and license.** Demo Analysis is by Fidoo001 and contributors ([tf2-demo-analyser on GitHub](https://github.com/Fidoo001/tf2-demo-analyser)) under the GNU GPL version 3. This version adds the built-in 3D player and the TF2BD community lists as defaults, and is shared under the same license with its full source in the `source` folder. `CHANGES.txt` lists every change, with dates.

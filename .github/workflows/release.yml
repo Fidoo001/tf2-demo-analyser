@@ -1,0 +1,89 @@
+# Builds Demo Analysis and publishes it as a release whenever main changes, so the
+# app's "Update available" button can offer it. Each release is "build-<number>";
+# the number is baked into the program, which is how it knows whether it's out of date.
+name: Build and release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "vendor/**"
+      - "assets/**"
+      - "packaging/**"
+      - "docs/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "build.rs"
+      - "algo_costs.json"
+      - "cosmetics.json"
+      - "GUIDE.md"
+      - "CHANGES.txt"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: never
+  # A program that runs on any Windows PC without the Visual C++ runtime installed.
+  RUSTFLAGS: -C target-feature=+crt-static
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Tests
+        run: |
+          cargo test --release --bin cli
+          cargo test --release --lib --bin gui --features gui,rcon,tf2bd,parallel
+
+      - name: Build
+        env:
+          DEMO_ANALYSIS_BUILD: ${{ github.run_number }}
+        run: |
+          cargo build --release --bin cli
+          cargo build --release --bin gui --features gui,rcon,tf2bd,parallel
+
+      - name: Package
+        shell: bash
+        run: |
+          python packaging/make_zip.py . target/release packaging/README.txt Demo-Analysis-with-3D-Player.zip
+          cp target/release/gui.exe Demo-Analysis.exe
+          sha256sum Demo-Analysis.exe Demo-Analysis-with-3D-Player.zip > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          build="${{ github.run_number }}"
+          upstream=$(grep -oE 'UPSTREAM_MERGED: &str = "[0-9a-f]{7}' src/bin/gui.rs | grep -oE '[0-9a-f]{7}$')
+          notes="Demo Analysis with the 3D player, build ${build}, including Fidoo001's project up to ${upstream}.
+
+          **Download:** Demo-Analysis-with-3D-Player.zip, unzip it anywhere and run \`Demo Analysis.exe\`. If you already have it, click **Update available** in the program instead.
+
+          Needs Windows 10 or 11 and TF2 installed through Steam. The program isn't signed, so Windows may say it \"protected your PC\": click More info, then Run anyway. \`GUIDE.md\` in the zip explains everything; \`CHANGES.txt\` lists every change.
+
+          SHA256SUMS.txt has the checksum of each file."
+          gh release create "build-${build}" \
+            Demo-Analysis-with-3D-Player.zip Demo-Analysis.exe SHA256SUMS.txt \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "Demo Analysis with 3D Player, build ${build}" \
+            --notes "$notes"

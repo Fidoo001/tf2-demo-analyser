@@ -80,7 +80,12 @@ Main window
     TF2BD playerlists. Configure playerlists has buttons to add them
     back if you remove them.
   - It tells you when Fidoo001's project has new changes ("N upstream
-    updates" next to Open...).
+    updates" next to Open...), and updates itself: "Update available"
+    downloads the newest release, checks its checksum and restarts,
+    keeping the previous version as "Demo Analysis (previous).exe".
+  - A robot on the GitHub repository checks Fidoo001's project every
+    day, merges his changes, runs the tests and opens a pull request;
+    merging it builds and publishes a new release.
   - Fixed: the skiesred/oob_pitch check had no tooltip, which made one
     of the original's own tests fail. It now has one.
 
@@ -144,6 +149,10 @@ HISTORY (newest first)
     just fired no longer draws a line across the whole screen.
   - Fixed: demos on some community maps wouldn't open ("damaged"),
     because of a map model whose animations are kept in a separate file.
+  - Added updates: the app offers each new release from
+    github.com/wombo14/tf2-demo-analyser and installs it on a click. A
+    daily robot brings in Fidoo001's changes as pull requests, and a
+    release robot builds and publishes every change to main.
   - Added third person: watch a player from behind (First person / Third
     person next to View, or C), drag to swing the camera around them like
     spectating, scroll to zoom, double-click to go back behind them.
@@ -208,19 +217,24 @@ New
                              and photographs every pose in a demo
   GUIDE.md                   the user guide
   docs/images/               the guide's screenshots
+  packaging/                 the download zip's README and packing script
+  .github/workflows/         the daily check of Fidoo001's project
+                             (upstream.yml) and the release builder
+                             (release.yml)
 
 Changed
   Cargo.toml                 the 3D player's libraries (including cpal
-                             for sound output and symphonia for MP3)
-                             and its "player" feature
+                             for sound output and symphonia for MP3),
+                             sha2 for checking updates, and the
+                             "player" feature
   Cargo.lock                 the exact versions of those libraries
   src/lib.rs                 adds the 3D player, and builds voice chat
                              decoding (src/util/voice.rs) for it too,
                              not only for the experimental build
   src/bin/gui.rs             Watch demo buttons, opening the player,
                              marking in TF2BD from the player, the
-                             update check, and scripted input for the
-                             guide's screenshots
+                             update check and updater, and scripted
+                             input for the guide's screenshots
   src/tf2bd.rs               the community lists as defaults
   src/tf2bd_view.rs          buttons to add the community lists
   src/lib/algorithm.rs       the missing skiesred/oob_pitch tooltip

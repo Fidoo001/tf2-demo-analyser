@@ -38,6 +38,7 @@ serde_json = "1.0.140"
 steamid-ng = "1.0.0"
 tf-demo-parser = "0.6.4"
 ureq = "2.12.1"
+sha2 = { version = "0.10", optional = true }
 web-time = "1.1.0"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 lzma-rs = "0.3"
@@ -60,7 +61,7 @@ cpal = { version = "0.15.3", optional = true }
 symphonia = { version = "0.5.4", default-features = false, features = ["mp3"], optional = true }
 
 [features]
-gui = [ "eframe", "egui", "dep:rfd", "player" ]
+gui = [ "eframe", "egui", "dep:rfd", "dep:sha2", "player" ]
 player = [ "eframe", "egui", "dep:bytemuck", "dep:cpal", "dep:glam", "dep:image", "dep:symphonia", "dep:tf-asset-loader", "dep:unsafe-libopus", "dep:vbsp", "dep:vmdl", "dep:vtf" ]
 experimental = [ "dep:unsafe-libopus" ]
 parallel = [ "dep:rayon" ]

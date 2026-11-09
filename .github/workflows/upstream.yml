@@ -1,0 +1,146 @@
+# Checks Fidoo001's original project every day. When it has new commits, this merges
+# them into a branch, runs the tests, and opens (or updates) a pull request for you to
+# merge. Merging it starts "Build and release", which the app then offers as an update.
+# When the merge has conflicts it opens an issue instead, to merge them by hand.
+name: Check Fidoo001's project
+
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: upstream
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: never
+  UPSTREAM: https://github.com/Fidoo001/tf2-demo-analyser.git
+  BRANCH: upstream-update
+
+jobs:
+  check:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Look for new commits
+        id: look
+        shell: bash
+        run: |
+          git remote add upstream "$UPSTREAM"
+          git fetch --quiet upstream main
+          new=$(git rev-list --count HEAD..upstream/main)
+          sha=$(git rev-parse upstream/main)
+          echo "new=$new" >> "$GITHUB_OUTPUT"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          # Nothing to do when the update branch already has these commits.
+          if [ "$new" != "0" ] && git fetch --quiet origin "$BRANCH" 2>/dev/null \
+            && git merge-base --is-ancestor upstream/main "origin/$BRANCH"; then
+            echo "Already waiting in $BRANCH"
+            echo "new=0" >> "$GITHUB_OUTPUT"
+          fi
+          echo "Fidoo001's main is at $sha, $new new commit(s)"
+
+      - name: Merge
+        id: merge
+        if: steps.look.outputs.new != '0'
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B "$BRANCH"
+          if git merge --no-edit -m "Merge Fidoo001's latest changes" upstream/main; then
+            # The app counts Fidoo001's commits since this one.
+            sed -i "s/^const UPSTREAM_MERGED: &str = \"[0-9a-f]*\";/const UPSTREAM_MERGED: \&str = \"${{ steps.look.outputs.sha }}\";/" src/bin/gui.rs
+            git commit -am "Count Fidoo001's commits from the merged one" || true
+            echo "clean=true" >> "$GITHUB_OUTPUT"
+          else
+            files=$(git diff --name-only --diff-filter=U | tr '\n' ' ')
+            git merge --abort
+            echo "clean=false" >> "$GITHUB_OUTPUT"
+            echo "files=$files" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Rust
+        if: steps.merge.outputs.clean == 'true'
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - uses: Swatinem/rust-cache@v2
+        if: steps.merge.outputs.clean == 'true'
+
+      - name: Tests
+        id: tests
+        if: steps.merge.outputs.clean == 'true'
+        continue-on-error: true
+        run: |
+          cargo test --release --bin cli
+          cargo test --release --lib --bin gui --features gui,rcon,tf2bd,parallel
+
+      - name: Pull request
+        if: steps.merge.outputs.clean == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git push --force origin "$BRANCH"
+          sha="${{ steps.look.outputs.sha }}"
+          count=$(git rev-list --count origin/main..upstream/main)
+          if [ "${{ steps.tests.outcome }}" = "success" ]; then
+            verdict="The tests pass, so this is ready to merge. Merging it builds a new release, and the app will offer it as **Update available**."
+          else
+            verdict="**The tests failed** after merging, so don't merge this yet. Open the run below to see what failed, and ask for it to be fixed."
+          fi
+          body="Fidoo001 changed his project: ${count} new commit(s), up to ${sha:0:7}.
+
+          ${verdict}
+
+          - What he changed: https://github.com/Fidoo001/tf2-demo-analyser/compare/$(git merge-base origin/main upstream/main)...${sha}
+          - This check: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          title="Update from Fidoo001 (${count} new commit(s))"
+          if gh pr view "$BRANCH" --repo "$GITHUB_REPOSITORY" --json state --jq .state 2>/dev/null | grep -q OPEN; then
+            gh pr edit "$BRANCH" --repo "$GITHUB_REPOSITORY" --title "$title" --body "$body"
+          elif ! gh pr create --repo "$GITHUB_REPOSITORY" --base main --head "$BRANCH" --title "$title" --body "$body"; then
+            # Robots may not open pull requests here until "Allow GitHub Actions to create and
+            # approve pull requests" is ticked (Settings > Actions > General), so ask with an issue.
+            link="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/compare/main...${BRANCH}?expand=1"
+            issue_title="Fidoo001's update is ready to merge"
+            issue_body="${body}
+
+          Open the pull request with one click: ${link}"
+            number=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "\"$issue_title\" in:title" --json number --jq '.[0].number // empty')
+            if [ -n "$number" ]; then
+              gh issue edit "$number" --repo "$GITHUB_REPOSITORY" --body "$issue_body"
+            else
+              gh issue create --repo "$GITHUB_REPOSITORY" --title "$issue_title" --body "$issue_body"
+            fi
+          fi
+
+      - name: Ask for a hand merge
+        if: steps.merge.outputs.clean == 'false'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          title="Fidoo001's update needs merging by hand"
+          open=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "\"$title\" in:title" --json number --jq 'length')
+          body="Fidoo001's project has new commits (up to ${{ steps.look.outputs.sha }}), but merging them clashes with changes in this version, in: ${{ steps.merge.outputs.files }}
+
+          Merge https://github.com/Fidoo001/tf2-demo-analyser into main by hand and fix those files. This check runs again every day.
+
+          Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          if [ "$open" = "0" ]; then
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body "$body"
+          else
+            echo "An issue is already open"
+          fi
