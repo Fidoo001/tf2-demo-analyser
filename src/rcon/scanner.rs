@@ -429,12 +429,16 @@ fn has_demo_magic(path: &Path) -> bool {
 /// Strips optional console timestamps (e.g. `10/12/2026 - 01:55:17: `) from log lines.
 pub fn strip_console_timestamp(line: &str) -> &str {
     let trimmed = line.trim();
-    if trimmed.len() >= 23
-        && trimmed.as_bytes().get(21) == Some(&b':')
-        && trimmed.as_bytes().get(22) == Some(&b' ')
-        && trimmed[..10].contains('/')
-        && trimmed[..20].contains('-')
+    // Checked on bytes: lines can contain multi-byte characters (player names, chat), and slicing
+    // the str at a byte index inside one of them panics.
+    let bytes = trimmed.as_bytes();
+    if bytes.len() >= 23
+        && bytes[21] == b':'
+        && bytes[22] == b' '
+        && bytes[..10].contains(&b'/')
+        && bytes[..20].contains(&b'-')
     {
+        // Byte 22 is an ASCII space, so byte 23 is always a char boundary
         trimmed[23..].trim()
     } else {
         trimmed
@@ -653,10 +657,34 @@ impl RealTimeScanner {
 
     /// Spawns the background scanner thread.
     pub fn spawn(self) -> std::thread::JoinHandle<()> {
-        std::thread::spawn(move || self.run_loop())
+        std::thread::Builder::new()
+            .name("live-scanner".to_string())
+            .spawn(move || {
+                // A panic must not end live scanning and RCON for the rest of the session: the loop
+                // starts over (reconnecting RCON, picking the recording up again) after a pause.
+                loop {
+                    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.run_loop())) {
+                        Ok(()) => break,
+                        Err(panic) => {
+                            let msg = panic
+                                .downcast_ref::<&str>()
+                                .map(|s| s.to_string())
+                                .or_else(|| panic.downcast_ref::<String>().cloned())
+                                .unwrap_or_else(|| "unknown error".to_string());
+                            eprintln!("[Live Scanner] Crashed ({msg}), restarting");
+                            let _ = self.tx.send(RealTimeScanEvent::RconConnected(false));
+                            let _ = self
+                                .tx
+                                .send(RealTimeScanEvent::RconStatus(format!("Live scanner crashed, restarting: {msg}")));
+                            std::thread::sleep(Duration::from_secs(2));
+                        }
+                    }
+                }
+            })
+            .expect("Failed to spawn live scanner thread")
     }
 
-    fn run_loop(self) {
+    fn run_loop(&self) {
         let mut rcon_client = RconClient::default();
         let mut prev_rcon_connected: Option<bool> = None;
         let mut active_demo: Option<PathBuf> = None;
@@ -710,7 +738,7 @@ impl RealTimeScanner {
                 continue;
             }
 
-            let cfg = self.config.lock().unwrap().clone();
+            let cfg = self.config.lock().unwrap_or_else(|e| e.into_inner()).clone();
             let ignored_recorder = if cfg.ignore_recorder {
                 local_steam_id().or(recorder_id_from_demo)
             } else {
@@ -749,8 +777,18 @@ impl RealTimeScanner {
                             let _ = self.tx.send(RealTimeScanEvent::RconStatus("Connected ✓".to_string()));
                             reconnect_backoff = Duration::from_secs(5);
                         }
+                        Err(e) if e.contains("invalid password") => {
+                            // TF2 bans 127.0.0.1 from RCON (until it is restarted) after a few wrong
+                            // passwords, so a wrong one is only retried once the password or port changes.
+                            reconnect_backoff = Duration::MAX;
+                            eprintln!("[Live Scanner] {e} — not retrying until the RCON settings change");
+                            let _ = self.tx.send(RealTimeScanEvent::RconStatus(format!(
+                                "Disconnected: {e} (not retried until the RCON settings change)"
+                            )));
+                        }
                         Err(e) => {
-                            reconnect_backoff = (reconnect_backoff * 2).min(Duration::from_secs(30));
+                            reconnect_backoff = reconnect_backoff.saturating_mul(2).min(Duration::from_secs(30));
+                            eprintln!("[Live Scanner] RCON connection failed: {e}");
                             let _ = self.tx.send(RealTimeScanEvent::RconStatus(format!(
                                 "Disconnected (retry in {}s): {}",
                                 reconnect_backoff.as_secs(),
@@ -768,7 +806,7 @@ impl RealTimeScanner {
             }
 
             // Warn about marked cheaters and tagged players present on the server
-            let watch_tagged = !self.tagged_players.lock().unwrap().is_empty();
+            let watch_tagged = !self.tagged_players.lock().unwrap_or_else(|e| e.into_inner()).is_empty();
             if !currently_connected || !(cfg.warn_marked_cheaters || watch_tagged) {
                 warned_marked.clear();
                 warned_tagged.clear();
@@ -781,12 +819,12 @@ impl RealTimeScanner {
                             let players = parse_status_players(&text);
                             if !players.is_empty() {
                                 let marked = if cfg.warn_marked_cheaters {
-                                    self.reported_ids.lock().unwrap().clone()
+                                    self.reported_ids.lock().unwrap_or_else(|e| e.into_inner()).clone()
                                 } else {
                                     HashSet::new()
                                 };
                                 let tags: Vec<Option<String>> = {
-                                    let tagged = self.tagged_players.lock().unwrap();
+                                    let tagged = self.tagged_players.lock().unwrap_or_else(|e| e.into_inner());
                                     players.iter().map(|(id, _)| tagged.get(id).cloned()).collect()
                                 };
                                 let present: HashSet<u64> = players.iter().map(|(id, _)| *id).collect();
@@ -961,13 +999,13 @@ impl RealTimeScanner {
                 };
 
                 let general_settings = {
-                    let p_map = self.params.lock().unwrap();
+                    let p_map = self.params.lock().unwrap_or_else(|e| e.into_inner());
                     GeneralSettings::from_config(&p_map)
                 };
 
                 let (mut algorithms, votes_enabled_by_user) = {
-                    let a_map = self.algos.lock().unwrap();
-                    let p_map = self.params.lock().unwrap();
+                    let a_map = self.algos.lock().unwrap_or_else(|e| e.into_inner());
+                    let p_map = self.params.lock().unwrap_or_else(|e| e.into_inner());
                     (
                         build_configured_algorithms(&a_map, &p_map),
                         a_map.get(VOTE_ALGORITHM).copied().unwrap_or(false),
@@ -1128,6 +1166,18 @@ mod tests {
 
         let input_no_ts = "Kim Shii killed LESNUK with sniperrifle.";
         assert_eq!(strip_console_timestamp(input_no_ts), expected);
+
+        // Multi-byte characters around the byte positions checked must not panic
+        // A 2-byte char at bytes 19-20 (the reported panic), and one at bytes 9-10
+        let at_20 = format!("{}é: hello", "a".repeat(19));
+        assert_eq!(at_20.as_bytes()[21], b':');
+        assert_eq!(strip_console_timestamp(&at_20), at_20);
+        let at_10 = format!("{}é{}: hello", "a".repeat(9), "-".repeat(10));
+        assert_eq!(at_10.as_bytes()[21], b':');
+        assert_eq!(strip_console_timestamp(&at_10), at_10);
+        for line in ["ééééééééééé: x", "a/éééééééé-ééé: yyyyyyyyyyy", "🙂🙂🙂🙂🙂-🙂🙂/ : zzzz"] {
+            let _ = strip_console_timestamp(line);
+        }
     }
 
     #[test]

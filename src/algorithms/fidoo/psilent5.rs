@@ -22,6 +22,74 @@ const MAX_FLICK_SPEED: f32 = 90.0;
 /// offset (degrees) for launches just past the previous view.
 const MIN_FLICK_ALIGNMENT: f32 = 0.8;
 const MAX_FLICK_SIDEWAYS: f32 = 8.0;
+/// Huntsman arrow speed at full charge (`CTFCompoundBow::GetProjectileSpeed`, 1800..2600). A bow
+/// can only be overcharged (held >= 5 s) once it is fully charged, so slower arrows have no spread.
+const BOW_FULL_CHARGE_SPEED: f32 = 2600.0;
+/// Tolerance for the quantised m_vInitialVelocity.
+const BOW_SPEED_TOLERANCE: f32 = 15.0;
+/// TF_ARROW_MAX_CHARGE_TIME (5 s) at 66.67 ticks/s, minus slack for cond update delays.
+const BOW_OVERCHARGE_TICKS: u32 = 320;
+/// The aiming cond is removed when the arrow fires, possibly in an update before the projectile.
+const BOW_RELEASE_SLACK_TICKS: u32 = 4;
+const TF_COND_AIMING: u32 = 1 << 0;
+
+/// Continuous TF_COND_AIMING run of a player. The bow adds the cond exactly when the charge
+/// starts and removes it on release, lower and holster. `start` is None when the run was already
+/// active when first seen (demo start, re-entering PVS, respawn) and its length is unknown.
+#[derive(Clone, Copy)]
+struct AimingRun {
+    start: Option<u32>,
+    end: u32,
+}
+
+#[derive(Default)]
+struct AimingTracker {
+    current: Option<AimingRun>,
+    last: Option<AimingRun>,
+    /// Whether the player was last seen in PVS and alive without the cond, so a new run's start is exact.
+    seen_not_aiming: bool,
+}
+
+impl AimingTracker {
+    fn update(&mut self, tick: u32, player: &Player) {
+        if !player.in_pvs || player.state != PlayerState::Alive {
+            if let Some(run) = self.current.take() {
+                self.last = Some(run);
+            }
+            self.seen_not_aiming = false;
+            return;
+        }
+        if player.cond & TF_COND_AIMING != 0 {
+            match &mut self.current {
+                Some(run) => run.end = run.end.max(tick),
+                None => {
+                    let start = self.seen_not_aiming.then_some(tick);
+                    self.current = Some(AimingRun { start, end: tick });
+                }
+            }
+        } else {
+            if let Some(run) = self.current.take() {
+                self.last = Some(run);
+            }
+            self.seen_not_aiming = true;
+        }
+    }
+
+    /// Whether the charge released at `tick` may have lasted the overcharge time.
+    fn may_be_overcharged(&self, tick: u32) -> bool {
+        let run = self.current.or(self
+            .last
+            .filter(|run| tick.saturating_sub(run.end) <= BOW_RELEASE_SLACK_TICKS));
+        match run {
+            Some(AimingRun { start: None, .. }) => true,
+            Some(AimingRun { start: Some(start), end }) => {
+                end.max(tick).saturating_sub(start) >= BOW_OVERCHARGE_TICKS
+            }
+            // No aiming run seen at all: unknown, do not excuse.
+            None => false,
+        }
+    }
+}
 
 // Standard and transition eye heights: ducking (45), intermediate crouch transitions, and standing (68, 72)
 const EYE_HEIGHTS: [f32; 6] = [45.0, 50.0, 56.0, 62.0, 68.0, 72.0];
@@ -74,6 +142,8 @@ struct LaunchCandidate {
     launch_direction: Vector,
     owner_distance: f32,
     pipe_type: Option<i64>,
+    /// The bow was charged (TF_COND_AIMING) long enough to be overcharged.
+    bow_held_long: bool,
 }
 
 struct TentativeDetection {
@@ -87,6 +157,7 @@ pub struct Psilent5 {
     pending: Vec<LaunchCandidate>,
     tentative: Vec<TentativeDetection>,
     observations: HashMap<(u32, u32), u32>,
+    aiming: HashMap<u64, AimingTracker>,
     params: Parameters,
 }
 
@@ -97,6 +168,7 @@ impl Psilent5 {
             pending: Vec::new(),
             tentative: Vec::new(),
             observations: HashMap::new(),
+            aiming: HashMap::new(),
             params: HashMap::from([
                 ("enabled".to_string(), Parameter::Bool(true)),
                 ("angle_threshold".to_string(), Parameter::Float(6.0)),
@@ -104,6 +176,8 @@ impl Psilent5 {
                 ("max_owner_distance".to_string(), Parameter::Float(115.0)),
                 ("minimum_samples".to_string(), Parameter::Int(2)),
                 ("hidden_flick_max_gap".to_string(), Parameter::Int(12)),
+                // Random spread (degrees, on pitch and yaw each) of an overcharged Huntsman arrow
+                ("bow_overcharge_spread".to_string(), Parameter::Float(6.0)),
             ]),
         }
     }
@@ -115,6 +189,7 @@ impl Psilent5 {
                 continue;
             };
             self.record_snapshot(steam_id, PlayerSnapshot::new(tick, player));
+            self.aiming.entry(steam_id).or_default().update(tick, player);
         }
         self.histories.retain(|_, history| {
             while history
@@ -334,6 +409,10 @@ impl CheatAlgorithm<'_> for Psilent5 {
                 launch_direction,
                 owner_distance,
                 pipe_type,
+                bow_held_long: self
+                    .aiming
+                    .get(&owner_steam_id)
+                    .is_some_and(|tracker| tracker.may_be_overcharged(tick)),
             });
         }
 
@@ -424,6 +503,24 @@ fn evaluate_candidate(
     let speed = vector_length(candidate.initial_velocity);
     let is_pipebomb = candidate.projectile == "CTFGrenadePipebombProjectile";
 
+    // A Huntsman held for 5 s or longer fires with a uniform random offset of up to
+    // `bow_overcharge_spread` degrees added to both pitch and yaw
+    // (CTFCompoundBow::GetProjectileFireSetup). The charge start time is local-only data, but a
+    // full-charge arrow whose aiming cond (added at charge start) lasted 5 s may be overcharged:
+    // only the deviation outside that box counts.
+    let overcharge_spread = if may_be_overcharged_arrow(&candidate, speed) {
+        get_parameter_value::<f32>(params, "bow_overcharge_spread").max(0.0)
+    } else {
+        0.0
+    };
+    let launch_delta = |expected: (f32, f32)| {
+        if overcharge_spread > 0.0 {
+            spread_box_residual(launch_angles, expected, overcharge_spread)
+        } else {
+            angle_delta(launch_angles, expected)
+        }
+    };
+
     let mut raw_delta = f32::INFINITY;
     let mut compensated_delta = f32::INFINITY;
     let mut best_view = (0.0, 0.0);
@@ -502,7 +599,7 @@ fn evaluate_candidate(
                     v_view
                 };
                 let direct_angles = vector_angles(expected_direct);
-                let direct_delta = angle_delta(direct_angles, launch_angles);
+                let direct_delta = launch_delta(direct_angles);
                 if direct_delta < compensated_delta {
                     compensated_delta = direct_delta;
                     best_view = view;
@@ -534,7 +631,7 @@ fn evaluate_candidate(
                                 }
                             }
                             let expected_angles = vector_angles(expected_dir);
-                            let delta = angle_delta(launch_angles, expected_angles);
+                            let delta = launch_delta(expected_angles);
                             if delta < compensated_delta {
                                 compensated_delta = delta;
                                 best_view = view;
@@ -566,7 +663,7 @@ fn evaluate_candidate(
                                 }
                             }
                             let expected_angles = vector_angles(expected_dir);
-                            let delta = angle_delta(launch_angles, expected_angles);
+                            let delta = launch_delta(expected_angles);
                             if delta < compensated_delta {
                                 compensated_delta = delta;
                                 best_view = view;
@@ -596,7 +693,7 @@ fn evaluate_candidate(
                             }
                         }
                         let expected_angles = vector_angles(expected_dir);
-                        let delta = angle_delta(launch_angles, expected_angles);
+                        let delta = launch_delta(expected_angles);
                         if delta < compensated_delta {
                             compensated_delta = delta;
                             best_view = view;
@@ -658,6 +755,8 @@ fn evaluate_candidate(
                 "owner_distance": candidate.owner_distance,
                 "pipe_type": candidate.pipe_type,
                 "samples": samples.len(),
+                "overcharge_spread": overcharge_spread,
+                "bow_held_long": candidate.bow_held_long,
             }),
         },
     })
@@ -772,6 +871,29 @@ fn projectile_launcher(props: &[tf_demo_parser::demo::sendprop::SendProp]) -> Op
     )?;
     let entid = handle_to_entid(handle as u32);
     (u32::from(entid) != 0 && u32::from(entid) != 0x7FF).then_some(entid)
+}
+
+fn is_bow(weapon_name: &str) -> bool {
+    weapon_name.contains("Huntsman") || weapon_name.contains("Compound")
+}
+
+fn may_be_overcharged_arrow(candidate: &LaunchCandidate, speed: f32) -> bool {
+    candidate.projectile == "CTFProjectile_Arrow"
+        && is_bow(&candidate.weapon_name)
+        && speed >= BOW_FULL_CHARGE_SPEED - BOW_SPEED_TOLERANCE
+        && candidate.bow_held_long
+}
+
+/// Angular deviation left after allowing up to `spread` degrees of independent pitch and yaw
+/// offset, the way the engine adds overcharge spread to the fire angles.
+fn spread_box_residual(launch: (f32, f32), expected: (f32, f32), spread: f32) -> f32 {
+    let yaw_diff = (launch.0 - expected.0 + 180.0).rem_euclid(360.0) - 180.0;
+    let pitch_diff = launch.1 - expected.1;
+    let explained = (
+        expected.0 + yaw_diff.clamp(-spread, spread),
+        expected.1 + pitch_diff.clamp(-spread, spread),
+    );
+    angle_delta(launch, explained)
 }
 
 fn is_excluded_weapon(weapon_name: &str) -> bool {
@@ -1040,6 +1162,18 @@ mod tests {
         let detections = algo.finish().unwrap();
         assert_eq!(detections.len(), 1);
         assert_eq!(detections[0].tick, 101);
+    }
+
+    #[test]
+    fn test_overcharge_spread_box() {
+        // Inside the box: fully explained, also across the yaw wrap.
+        assert!(spread_box_residual((5.0, 10.0), (0.0, 5.5), 6.0) < 1e-3);
+        assert!(spread_box_residual((-178.0, 0.0), (178.0, 0.0), 6.0) < 1e-3);
+        // Corner of the box (8.5 deg diagonal) is explained.
+        assert!(spread_box_residual((6.0, 6.0), (0.0, 0.0), 6.0) < 1e-3);
+        // Outside: only the excess counts.
+        let residual = spread_box_residual((0.0, 16.0), (0.0, 0.0), 6.0);
+        assert!((residual - 10.0).abs() < 0.01, "{residual}");
     }
 
     #[test]

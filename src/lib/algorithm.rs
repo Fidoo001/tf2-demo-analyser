@@ -43,9 +43,17 @@ pub fn get_all_algorithms() -> Vec<Box<dyn CheatAlgorithm<'static> + Send>> {
 
 /// Checks if an algorithm name belongs to the experimental algorithm list.
 pub fn is_experimental_algorithm_name(name: &str) -> bool {
-    get_experimental_algorithms()
-        .iter()
-        .any(|a| a.algorithm_name() == name)
+    // The GUI asks for every algorithm several times per frame; building all experimental
+    // algorithms each time made frames slow, and the list is fixed at compile time.
+    static NAMES: std::sync::OnceLock<std::collections::HashSet<String>> = std::sync::OnceLock::new();
+    NAMES
+        .get_or_init(|| {
+            get_experimental_algorithms()
+                .iter()
+                .map(|a| a.algorithm_name().to_string())
+                .collect()
+        })
+        .contains(name)
 }
 
 use crate::lib::general_settings::GeneralSettings;

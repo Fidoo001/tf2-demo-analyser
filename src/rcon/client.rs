@@ -59,9 +59,54 @@ fn send_packet(stream: &mut TcpStream, id: i32, packet_type: i32, body: &str) ->
     Ok(())
 }
 
-fn read_packet(stream: &mut TcpStream) -> std::io::Result<(i32, i32, String)> {
+/// How long the rest of a packet that has started to arrive is waited for (TF2 can stall for a
+/// few seconds, e.g. while loading a map) before the connection is considered broken.
+const PARTIAL_PACKET_WAIT: Duration = Duration::from_secs(5);
+/// Longest a command waits for its reply while other (stale) packets keep arriving.
+const COMMAND_REPLY_WAIT: Duration = Duration::from_secs(3);
+
+fn is_timeout(e: &std::io::Error) -> bool {
+    matches!(e.kind(), std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock)
+}
+
+/// Fills `buf` completely. Returns `Ok(false)` if `idle_ok` and the read timed out before any byte
+/// arrived. A packet that stops arriving halfway is an error: the stream would be out of sync.
+fn fill(stream: &mut TcpStream, buf: &mut [u8], idle_ok: bool) -> std::io::Result<bool> {
+    let mut read = 0;
+    let started = std::time::Instant::now();
+    while read < buf.len() {
+        match stream.read(&mut buf[read..]) {
+            Ok(0) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "connection closed by TF2",
+                ))
+            }
+            Ok(n) => read += n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) if is_timeout(&e) => {
+                if read == 0 && idle_ok {
+                    return Ok(false);
+                }
+                if started.elapsed() >= PARTIAL_PACKET_WAIT {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "incomplete RCON packet",
+                    ));
+                }
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(true)
+}
+
+/// Reads one packet: `Ok(None)` if none arrived within the read timeout.
+fn read_packet(stream: &mut TcpStream) -> std::io::Result<Option<(i32, i32, String)>> {
     let mut size_buf = [0u8; 4];
-    stream.read_exact(&mut size_buf)?;
+    if !fill(stream, &mut size_buf, true)? {
+        return Ok(None);
+    }
     let size = i32::from_le_bytes(size_buf);
     if size < 10 || size > 65536 {
         return Err(std::io::Error::new(
@@ -70,7 +115,7 @@ fn read_packet(stream: &mut TcpStream) -> std::io::Result<(i32, i32, String)> {
         ));
     }
     let mut payload = vec![0u8; size as usize];
-    stream.read_exact(&mut payload)?;
+    fill(stream, &mut payload, false)?;
     let id = i32::from_le_bytes(payload[0..4].try_into().unwrap());
     let packet_type = i32::from_le_bytes(payload[4..8].try_into().unwrap());
     let body_end = payload[8..]
@@ -78,7 +123,14 @@ fn read_packet(stream: &mut TcpStream) -> std::io::Result<(i32, i32, String)> {
         .position(|&b| b == 0)
         .unwrap_or(payload.len() - 8);
     let body = String::from_utf8_lossy(&payload[8..8 + body_end]).to_string();
-    Ok((id, packet_type, body))
+    Ok(Some((id, packet_type, body)))
+}
+
+/// Id of the next command, so its reply can be told apart from late replies to earlier ones.
+fn next_command_id() -> i32 {
+    static NEXT_ID: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(100);
+    // Positive and never 1 (auth) or -1 (failed auth), also after wrapping around
+    (NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed) & 0x3FFF_FFFF).max(100)
 }
 
 impl RconClient {
@@ -144,9 +196,17 @@ impl RconClient {
         // Read responses. Server may reply with an empty SERVERDATA_RESPONSE_VALUE first,
         // then SERVERDATA_AUTH_RESPONSE.
         let mut authenticated = false;
+        let auth_started = std::time::Instant::now();
         for _ in 0..5 {
             match read_packet(&mut stream) {
-                Ok((id, packet_type, _)) => {
+                // TF2 may be busy for a moment (e.g. loading a map)
+                Ok(None) if auth_started.elapsed() < COMMAND_REPLY_WAIT => continue,
+                Ok(None) => {
+                    let err = "Timed out waiting for the RCON auth response".to_string();
+                    self.state = RconConnectionState::Error(err.clone());
+                    return Err(err);
+                }
+                Ok(Some((id, packet_type, _))) => {
                     if packet_type == SERVERDATA_AUTH_RESPONSE {
                         if id == -1 {
                             let err = "RCON authentication failed: invalid password".to_string();
@@ -224,19 +284,23 @@ impl RconClient {
             Err(poisoned) => poisoned.into_inner(),
         };
 
-        if let Err(e) = send_packet(&mut stream, 2, SERVERDATA_EXECCOMMAND, trimmed) {
+        let id = next_command_id();
+        if let Err(e) = send_packet(&mut stream, id, SERVERDATA_EXECCOMMAND, trimmed) {
             return Err(format!("Failed to send command to TF2: {e}"));
         }
 
-        match read_packet(&mut stream) {
-            Ok((_, _, body)) => Ok(body),
-            Err(e) => {
-                // If read timed out, command was still delivered to TF2 (e.g. playdemo or demo_gototick has no console output)
-                if e.kind() == std::io::ErrorKind::TimedOut || e.kind() == std::io::ErrorKind::WouldBlock {
-                    Ok(String::new())
-                } else {
-                    Err(format!("Connection lost: {e}"))
-                }
+        // Packets with another id are replies to earlier commands that came late or in several
+        // packets (long outputs such as `status`); they are skipped so they cannot pile up in the
+        // socket or be taken for this command's reply.
+        let started = std::time::Instant::now();
+        loop {
+            match read_packet(&mut stream) {
+                Ok(Some((reply_id, _, body))) if reply_id == id => return Ok(body),
+                Ok(Some(_)) if started.elapsed() < COMMAND_REPLY_WAIT => {}
+                // No reply (yet): the command was still delivered to TF2 (e.g. playdemo or
+                // demo_gototick have no console output)
+                Ok(_) => return Ok(String::new()),
+                Err(e) => return Err(format!("Connection lost: {e}")),
             }
         }
     }
@@ -272,5 +336,79 @@ impl RconClient {
 impl Default for RconClient {
     fn default() -> Self {
         Self::new(RconConfig::default())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::TcpListener;
+
+    fn packet(id: i32, packet_type: i32, body: &str) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend(((4 + 4 + body.len() + 2) as i32).to_le_bytes());
+        out.extend(id.to_le_bytes());
+        out.extend(packet_type.to_le_bytes());
+        out.extend(body.as_bytes());
+        out.extend([0, 0]);
+        out
+    }
+
+    /// Fake TF2: answers the auth, then runs `script` with each command's id.
+    fn fake_tf2(script: impl FnOnce(&mut TcpStream, &mut dyn FnMut(&mut TcpStream) -> (i32, String)) + Send + 'static) -> RconClient {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            let mut read_cmd = |s: &mut TcpStream| {
+                let (id, _, body) = read_packet(s).unwrap().unwrap();
+                (id, body)
+            };
+            let (auth_id, _) = read_cmd(&mut s);
+            s.write_all(&packet(auth_id, SERVERDATA_RESPONSE_VALUE, "")).unwrap();
+            s.write_all(&packet(auth_id, SERVERDATA_AUTH_RESPONSE, "")).unwrap();
+            script(&mut s, &mut read_cmd);
+            std::thread::sleep(Duration::from_secs(8));
+        });
+        let mut client = RconClient::new(RconConfig {
+            server_address: addr.to_string(),
+            password: "pw".to_string(),
+            timeout: Duration::from_millis(300),
+        });
+        client.connect().unwrap();
+        client
+    }
+
+    #[test]
+    fn replies_are_matched_by_id() {
+        let mut client = fake_tf2(|s, read_cmd| {
+            // `status`: a reply in two packets
+            let (id, body) = read_cmd(s);
+            assert_eq!(body, "status");
+            s.write_all(&packet(id, 0, "status part 1")).unwrap();
+            s.write_all(&packet(id, 0, "status part 2")).unwrap();
+            // A command without a reply, which comes late: after the next command was sent
+            let (late_id, _) = read_cmd(s);
+            let (id, body) = read_cmd(s);
+            assert_eq!(body, "echo b");
+            s.write_all(&packet(late_id, 0, "late")).unwrap();
+            s.write_all(&packet(id, 0, "b")).unwrap();
+        });
+        assert_eq!(client.send_command("status").unwrap(), "status part 1");
+        assert_eq!(client.send_command("playdemo x").unwrap(), "");
+        // Skips the rest of `status` and the late reply
+        assert_eq!(client.send_command("echo b").unwrap(), "b");
+        assert!(client.is_connected());
+    }
+
+    #[test]
+    fn half_sent_packet_disconnects() {
+        let mut client = fake_tf2(|s, read_cmd| {
+            let (id, _) = read_cmd(s);
+            let full = packet(id, 0, "cut off");
+            s.write_all(&full[..9]).unwrap();
+        });
+        assert!(client.send_command("echo a").is_err());
+        assert!(!client.is_connected());
     }
 }
