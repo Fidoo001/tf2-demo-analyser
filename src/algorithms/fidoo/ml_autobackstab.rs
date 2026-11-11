@@ -687,12 +687,17 @@ fn attack_tick(attacks: &VecDeque<u32>, hurt_tick: u32) -> u32 {
 }
 
 impl<'a> CheatAlgorithm<'a> for MlAutoBackstab {
-    fn default(&self) -> bool {
-        true
-    }
-
     fn algorithm_name(&self) -> &str {
         "fidoo/ml_autobackstab"
+    }
+
+    fn tooltip(&self) -> &'static str {
+        "Scores each spectated spy's backstabs over the whole demo with a learned model of auto backstab use (stab on the first possible tick without raising the knife, view snapping onto the victim's origin, level pitch, backtracked records) and marks the most auto-backstab-like stabs."
+    }
+
+    // Never hidden by the global sliding window: aggregates its evidence per player over the whole demo
+    fn excluded_from_sliding_window(&self) -> bool {
+        true
     }
 
     fn params(&mut self) -> Option<&mut Parameters> {

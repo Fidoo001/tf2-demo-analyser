@@ -181,10 +181,6 @@ impl Default for Psilent5 {
 }
 
 impl CheatAlgorithm<'_> for Psilent5 {
-    fn default(&self) -> bool {
-        true
-    }
-
     fn algorithm_name(&self) -> &str {
         "fidoo/psilent5"
     }

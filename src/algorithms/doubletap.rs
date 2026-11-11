@@ -251,10 +251,6 @@ fn build_data(items: Vec<(&str, Value)>) -> Value {
 }
 
 impl<'a> CheatAlgorithm<'a> for DoubleTap {
-    fn default(&self) -> bool {
-        false
-    }
-
     fn algorithm_name(&self) -> &str {
         "doubletap"
     }

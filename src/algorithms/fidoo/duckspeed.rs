@@ -89,10 +89,6 @@ impl CrouchSpeed {
 }
 
 impl<'a> CheatAlgorithm<'a> for CrouchSpeed {
-    fn default(&self) -> bool {
-        true
-    }
-
     fn algorithm_name(&self) -> &str {
         "fidoo/duckspeed"
     }
@@ -333,7 +329,7 @@ mod tests {
                 classes: Default::default(),
                 name: "TestSubject".to_string(),
                 user_id: 1u32.into(),
-                steam_id: SteamID::from(steam_id).steam3(),
+                steam_id: SteamID::try_from(steam_id).map(|id| id.steam3()).unwrap_or_default(),
                 entity_id: 1u32.into(),
                 team: Team::Red,
             }),

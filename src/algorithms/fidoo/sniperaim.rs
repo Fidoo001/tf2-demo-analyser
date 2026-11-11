@@ -1163,10 +1163,6 @@ impl SniperAim {
 }
 
 impl<'a> CheatAlgorithm<'a> for SniperAim {
-    fn default(&self) -> bool {
-        true
-    }
-
     fn algorithm_name(&self) -> &str {
         "fidoo/sniperaim"
     }

@@ -901,12 +901,17 @@ impl MlPsilent {
 }
 
 impl<'a> CheatAlgorithm<'a> for MlPsilent {
-    fn default(&self) -> bool {
-        true
-    }
-
     fn algorithm_name(&self) -> &str {
         "fidoo/ml_psilent"
+    }
+
+    fn tooltip(&self) -> &'static str {
+        "Scores each player's projectile launches over the whole demo with a learned model of projectile silent aim: a launch direction that no view on the player's networked view path can produce, accounting for the muzzle offset, with update gaps and turn speed deciding what lag or a hidden flick can explain."
+    }
+
+    // Never hidden by the global sliding window: aggregates its evidence per player over the whole demo
+    fn excluded_from_sliding_window(&self) -> bool {
+        true
     }
 
     fn params(&mut self) -> Option<&mut Parameters> {

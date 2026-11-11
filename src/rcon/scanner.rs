@@ -15,8 +15,7 @@ use std::time::{Duration, Instant};
 use crate::base::cheat_analyser_base::CheatAnalyser;
 use crate::lib::algorithm::{analyse_sequential_from_tick, get_algorithms, CheatAlgorithm, Demo};
 use crate::lib::live_scan::{
-    analysed_until, is_skipped_in_live_scan, LiveScanGate, LiveScanProgress,
-    DEFAULT_LIVE_SCAN_INTERVAL_SECONDS,
+    analysed_until, LiveScanGate, LiveScanProgress, DEFAULT_LIVE_SCAN_INTERVAL_SECONDS,
 };
 use crate::lib::general_settings::GeneralSettings;
 use crate::lib::parameters::{Parameter, Parameters};
@@ -553,8 +552,8 @@ pub fn build_configured_algorithms(
     let mut algorithms = Vec::new();
     for mut algo in get_algorithms() {
         let name = algo.algorithm_name().to_string();
-        let enabled = algos_map.get(&name).copied().unwrap_or_else(|| algo.default());
-        if !enabled || is_skipped_in_live_scan(&name) {
+        let enabled = algos_map.get(&name).copied().unwrap_or_else(|| algo.default_enabled());
+        if !enabled || algo.skipped_in_live_scan() {
             continue;
         }
         if let Some(algo_params) = algo.params() {

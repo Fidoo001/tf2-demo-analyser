@@ -695,10 +695,6 @@ impl AutoBackstab {
 }
 
 impl<'a> CheatAlgorithm<'a> for AutoBackstab {
-    fn default(&self) -> bool {
-        true
-    }
-
     fn algorithm_name(&self) -> &str {
         "fidoo/auto_backstab"
     }

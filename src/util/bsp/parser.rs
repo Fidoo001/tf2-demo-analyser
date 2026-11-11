@@ -244,5 +244,6 @@ pub fn parse_bsp<P: AsRef<Path>>(path: P) -> io::Result<BspCollisionData> {
         texinfo,
         texdata,
         material_names,
+        sight_opaque: Default::default(),
     })
 }

@@ -458,17 +458,6 @@ pub const EXPERIMENTAL_SOURCE_HASHES: &[u64] = {};
     };
     write_if_changed(&Path::new(&out_dir).join("builtin_costs.json"), &builtin_costs);
 
-    // 7. Check for experimental sliding window exclusions file
-    println!("cargo:rustc-check-cfg=cfg(has_experimental_exclusions)");
-    let exp_exclusions_file = Path::new(&manifest_dir)
-        .join("src")
-        .join("lib")
-        .join("excluded_algorithms_experimental.rs");
-    if exp_exclusions_file.exists() {
-        println!("cargo:rerun-if-changed={}", exp_exclusions_file.display());
-        println!("cargo:rustc-cfg=has_experimental_exclusions");
-    }
-
     #[cfg(windows)]
     if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         let mut res = winres::WindowsResource::new();

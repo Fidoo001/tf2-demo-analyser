@@ -770,10 +770,6 @@ impl PlainAimbot {
 }
 
 impl<'a> CheatAlgorithm<'a> for PlainAimbot {
-    fn default(&self) -> bool {
-        true
-    }
-
     fn algorithm_name(&self) -> &str {
         "fidoo/plain_aimbot"
     }

@@ -37,10 +37,6 @@ impl AngleHistory {
 }
 
 impl<'a> CheatAlgorithm<'a> for AngleHistory {
-    fn default(&self) -> bool {
-        false
-    }
-
     fn algorithm_name(&self) -> &str {
         "angle_history"
     }

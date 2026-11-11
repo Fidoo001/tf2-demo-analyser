@@ -332,11 +332,11 @@ impl Playerlist {
             players.remove(i);
         }
         let index = index.unwrap_or_else(|| {
-            players.push(serde_json::json!({ "steamid": SteamID::from(steam_id).steam3() }));
+            players.push(serde_json::json!({ "steamid": SteamID::try_from(steam_id).map(|id| id.steam3()).unwrap_or_default() }));
             players.len() - 1
         });
         if !players[index].is_object() {
-            players[index] = serde_json::json!({ "steamid": SteamID::from(steam_id).steam3() });
+            players[index] = serde_json::json!({ "steamid": SteamID::try_from(steam_id).map(|id| id.steam3()).unwrap_or_default() });
         }
         let entry = players[index].as_object_mut().unwrap();
         entry.insert("attributes".to_string(), serde_json::json!(attributes));

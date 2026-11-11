@@ -54,6 +54,8 @@ pub struct BspCollisionData {
     pub texinfo: Vec<TexInfo>,
     pub texdata: Vec<TexData>,
     pub material_names: Vec<String>,
+    /// Per brush: does it block sight (see [`BspCollisionData::sight_blocked`]). Built on first use.
+    pub sight_opaque: std::sync::OnceLock<Vec<bool>>,
 }
 
 impl BspCollisionData {
@@ -462,5 +464,175 @@ impl BspCollisionData {
             }
         }
         result
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Strict line of sight (fidoo/ml_wallhack)
+// ---------------------------------------------------------------------------------------------
+
+/// Tool materials that are solid but never drawn: a brush made only of these is invisible.
+const INVISIBLE_TOOL_MATERIALS: [&str; 8] = [
+    "toolsnodraw",
+    "toolsinvisible",
+    "toolsblockbullets",
+    "toolsclip",
+    "toolsplayerclip",
+    "toolsnpcclip",
+    "toolsskip",
+    "toolshint",
+];
+
+impl BspCollisionData {
+    /// Per brush: does it certainly hide what is behind it. A brush counts only when it is solid or
+    /// opaque, has no window / grate contents, no translucent or glass-like side, and at least one
+    /// side that is actually drawn (a brush of nodraw / invisible / block-bullets sides is see-through).
+    /// Everything doubtful is left out, so a missing occluder makes a target look visible, never hidden.
+    fn sight_opaque_table(&self) -> &Vec<bool> {
+        self.sight_opaque.get_or_init(|| {
+            // per texinfo: 0 = drawn opaque, 1 = not drawn, 2 = see-through
+            let side_kind: Vec<u8> = self
+                .texinfo
+                .iter()
+                .map(|ti| {
+                    if (ti.flags & SURF_TRANS) != 0 {
+                        return 2;
+                    }
+                    let name = self
+                        .texdata
+                        .get(ti.texdata as usize)
+                        .and_then(|td| self.material_names.get(td.name_string_table_id as usize))
+                        .map(|m| m.to_ascii_lowercase())
+                        .unwrap_or_default();
+                    if name.contains("glass") || name.contains("window") || name.contains("grate") || name.contains("fence") {
+                        return 2;
+                    }
+                    if (ti.flags & (SURF_SKY | SURF_SKY2D)) != 0 {
+                        return 0;
+                    }
+                    if (ti.flags & (SURF_NODRAW | SURF_SKIP | SURF_HINT | SURF_TRIGGER)) != 0
+                        || INVISIBLE_TOOL_MATERIALS.iter().any(|t| name.contains(t))
+                    {
+                        return 1;
+                    }
+                    0
+                })
+                .collect();
+            self.brushes
+                .iter()
+                .map(|brush| {
+                    if (brush.contents & (CONTENTS_SOLID | CONTENTS_OPAQUE)) == 0
+                        || (brush.contents & (CONTENTS_WINDOW | CONTENTS_GRATE)) != 0
+                    {
+                        return false;
+                    }
+                    let mut drawn = false;
+                    let first = brush.first_side.max(0) as usize;
+                    for side in self.brushsides.iter().skip(first).take(brush.num_sides.max(0) as usize) {
+                        if side.bevel != 0 || side.texinfo < 0 {
+                            continue;
+                        }
+                        match side_kind.get(side.texinfo as usize) {
+                            Some(2) => return false,
+                            Some(0) => drawn = true,
+                            _ => {}
+                        }
+                    }
+                    drawn
+                })
+                .collect()
+        })
+    }
+
+    /// True when the segment certainly crosses an opaque world brush. Unlike `trace_sightline`, the
+    /// brush classification is precomputed (no allocation per hit) and invisible solids do not block.
+    pub fn sight_blocked(&self, start: [f32; 3], end: [f32; 3]) -> bool {
+        if self.nodes.is_empty() {
+            return false;
+        }
+        let opaque = self.sight_opaque_table();
+        TRACE_SCRATCH.with(|scratch| {
+            let scratch = &mut *scratch.borrow_mut();
+            scratch.stamp = scratch.stamp.wrapping_add(1);
+            if scratch.stamp == 0 {
+                scratch.brush_stamps.fill(0);
+                scratch.stamp = 1;
+            }
+            if scratch.brush_stamps.len() < self.brushes.len() {
+                scratch.brush_stamps.resize(self.brushes.len(), 0);
+            }
+            let stamp = scratch.stamp;
+            let brush_stamps = &mut scratch.brush_stamps;
+            let stack = &mut scratch.stack;
+            stack.clear();
+            stack.push(StackEntry { node_idx: 0, t_start: 0.0, t_end: 1.0 });
+            let delta = [end[0] - start[0], end[1] - start[1], end[2] - start[2]];
+
+            while let Some(entry) = stack.pop() {
+                if entry.node_idx < 0 {
+                    let Some(leaf) = self.leafs.get((-entry.node_idx - 1) as usize) else { continue };
+                    let first = leaf.first_leafbrush as usize;
+                    for lb in first..first + leaf.num_leafbrushes as usize {
+                        let Some(&b) = self.leafbrushes.get(lb) else { break };
+                        let b = b as usize;
+                        if b >= self.brushes.len() || brush_stamps[b] == stamp {
+                            continue;
+                        }
+                        brush_stamps[b] = stamp;
+                        if !opaque[b] {
+                            continue;
+                        }
+                        let brush = &self.brushes[b];
+                        let mut enter = -1.0f32;
+                        let mut exit = 1.0f32;
+                        let mut starts_out = false;
+                        let mut miss = false;
+                        let first_side = brush.first_side as usize;
+                        for s in first_side..first_side + brush.num_sides as usize {
+                            let Some(side) = self.brushsides.get(s) else { break };
+                            let Some(plane) = self.planes.get(side.planenum as usize) else { continue };
+                            let d0 = start[0] * plane.normal[0] + start[1] * plane.normal[1] + start[2] * plane.normal[2] - plane.dist;
+                            let d1 = end[0] * plane.normal[0] + end[1] * plane.normal[1] + end[2] * plane.normal[2] - plane.dist;
+                            if d0 > 0.0 {
+                                starts_out = true;
+                            }
+                            if d0 > 0.0 && d1 > 0.0 {
+                                miss = true;
+                                break;
+                            }
+                            if d0 <= 0.0 && d1 <= 0.0 {
+                                continue;
+                            }
+                            if d0 > d1 {
+                                enter = enter.max((d0 - 0.03125) / (d0 - d1));
+                            } else {
+                                exit = exit.min((d0 + 0.03125) / (d0 - d1));
+                            }
+                        }
+                        if !miss && starts_out && enter < exit && enter >= 0.0 && enter < 1.0 {
+                            return true;
+                        }
+                    }
+                    continue;
+                }
+                let Some(node) = self.nodes.get(entry.node_idx as usize) else { continue };
+                let Some(plane) = self.planes.get(node.plane_num as usize) else { continue };
+                let at = |t: f32| [start[0] + t * delta[0], start[1] + t * delta[1], start[2] + t * delta[2]];
+                let (p0, p1) = (at(entry.t_start), at(entry.t_end));
+                let d0 = p0[0] * plane.normal[0] + p0[1] * plane.normal[1] + p0[2] * plane.normal[2] - plane.dist;
+                let d1 = p1[0] * plane.normal[0] + p1[1] * plane.normal[1] + p1[2] * plane.normal[2] - plane.dist;
+                if d0 >= 0.0 && d1 >= 0.0 {
+                    stack.push(StackEntry { node_idx: node.children[0], t_start: entry.t_start, t_end: entry.t_end });
+                } else if d0 < 0.0 && d1 < 0.0 {
+                    stack.push(StackEntry { node_idx: node.children[1], t_start: entry.t_start, t_end: entry.t_end });
+                } else {
+                    let (near, far) = if d0 >= 0.0 { (node.children[0], node.children[1]) } else { (node.children[1], node.children[0]) };
+                    let t_mid = entry.t_start + (d0 / (d0 - d1)).clamp(0.0, 1.0) * (entry.t_end - entry.t_start);
+                    stack.push(StackEntry { node_idx: far, t_start: t_mid, t_end: entry.t_end });
+                    stack.push(StackEntry { node_idx: near, t_start: entry.t_start, t_end: t_mid });
+                }
+            }
+            false
+        })
     }
 }

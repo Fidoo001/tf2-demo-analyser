@@ -25,7 +25,6 @@ autobins = false
 autoexamples = false
 autotests = false
 autobenches = false
-default-run = "parse_demo"
 description = "parser for tf2 demo files"
 readme = "README.md"
 license = "MIT OR Apache-2.0"
@@ -54,79 +53,6 @@ trace = [
 [lib]
 name = "tf_demo_parser"
 path = "src/lib.rs"
-
-[[bin]]
-name = "codegen"
-path = "src/bin/codegen.rs"
-required-features = ["codegen"]
-
-[[bin]]
-name = "direct_hits"
-path = "src/bin/direct_hits.rs"
-
-[[bin]]
-name = "gamestate"
-path = "src/bin/gamestate.rs"
-
-[[bin]]
-name = "parse_demo"
-path = "src/bin/main.rs"
-
-[[bin]]
-name = "reencode_demo"
-path = "src/bin/reencode.rs"
-
-[[bin]]
-name = "schema"
-path = "src/bin/schema.rs"
-required-features = ["schema"]
-
-[[bin]]
-name = "strings"
-path = "src/bin/strings.rs"
-
-[[example]]
-name = "allprops"
-path = "examples/allprops.rs"
-
-[[test]]
-name = "entity"
-path = "tests/entity.rs"
-
-[[test]]
-name = "message_reencode"
-path = "tests/message_reencode.rs"
-
-[[test]]
-name = "reencode"
-path = "tests/reencode.rs"
-
-[[test]]
-name = "sendprops"
-path = "tests/sendprops.rs"
-
-[[test]]
-name = "stringtable"
-path = "tests/stringtable.rs"
-
-[[test]]
-name = "tests"
-path = "tests/tests.rs"
-
-[[bench]]
-name = "allmessages"
-path = "benches/allmessages.rs"
-harness = false
-
-[[bench]]
-name = "bench"
-path = "benches/bench.rs"
-harness = false
-
-[[bench]]
-name = "iai"
-path = "benches/iai.rs"
-harness = false
 
 [dependencies.Inflector]
 version = "0.11"
@@ -234,22 +160,6 @@ optional = true
 version = "0.3.18"
 features = ["env-filter"]
 optional = true
-
-[dev-dependencies.criterion]
-version = "0.5.1"
-
-[dev-dependencies.iai]
-version = "0.1.1"
-
-[dev-dependencies.insta]
-version = "1.39.0"
-features = ["json"]
-
-[dev-dependencies.pretty_assertions]
-version = "1.4.0"
-
-[dev-dependencies.test-case]
-version = "3.3.1"
 
 [profile.dev]
 opt-level = 2

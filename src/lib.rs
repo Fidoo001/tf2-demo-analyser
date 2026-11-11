@@ -40,9 +40,6 @@ pub mod util {
 pub mod lib {
     pub mod algorithm;
     pub mod algorithm_costs;
-    pub mod excluded_algorithms_stable;
-    #[cfg(has_experimental_exclusions)]
-    pub mod excluded_algorithms_experimental;
     pub mod general_settings;
     pub mod live_scan;
     pub mod parameters;

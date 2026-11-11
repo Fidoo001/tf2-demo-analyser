@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 
-use crate::lib::algorithm::Detection;
+use crate::lib::algorithm::{is_excluded_from_sliding_window, Detection};
 use crate::lib::parameters::{Parameter, Parameters};
 
 /// General program settings stored under "general_settings" in params.json.
@@ -137,27 +137,12 @@ impl GeneralSettings {
         Self::default()
     }
 
-    /// Returns whether an algorithm is hardcoded as excluded from the global sliding window filter.
-    ///
-    /// Excluded algorithms include:
-    /// 1. Algorithms used to detect manipulated demos or cheating recorders:
-    ///    all demoswap, fidoo/tampered, all recorder related algorithms, lboxaimbot,
-    ///    amalgam aimbot and triggerbot, j_backtrack, sv_cheats_bypass,
-    ///    triggerbot double inputs, suspicious_motd
-    /// 2. Algorithms that already aggregate evidence per player: fidoo/triggerbot, fidoo/ml_aimbot,
-    ///    fidoo/ml_triggerbot, fidoo/ml_autobackstab, fidoo/ml_sniperaim, fidoo/ml_psilent, fidoo/ml_silent_aim,
-    ///    fidoo/ml_autostrafe
-    /// 3. Algorithms with 100% accuracy:
-    ///    oob pitch, invalid equip region
-    pub fn is_algorithm_excluded(algorithm_name: &str) -> bool {
-        is_excluded_from_sliding_window(algorithm_name)
-    }
-
     /// Applies the global sliding window filter to a slice of detections.
     ///
     /// Semantics:
     /// - If `!global_sliding_window_enabled` or `sliding_window_detections <= 1`, all detections are retained.
-    /// - Detections from excluded algorithms (100% accuracy or manipulated demo / recorder cheats) are ALWAYS retained.
+    /// - Detections from excluded algorithms (`CheatAlgorithm::excluded_from_sliding_window`, set in each
+    ///   algorithm's own file) are ALWAYS retained.
     /// - When `per_algorithm == false`: If ANY sliding window of `sliding_window_ticks` contains >= `sliding_window_detections`
     ///   for a player across any algorithms (or if the player has an excluded algorithm detection), the player is considered qualified,
     ///   and ALL detections for that player are kept (including earlier and later ones). If no window reaches the threshold and no
@@ -427,22 +412,6 @@ pub fn format_hex_rgb(rgb: [u8; 3]) -> String {
     format!("#{:02X}{:02X}{:02X}", rgb[0], rgb[1], rgb[2])
 }
 
-/// Returns whether an algorithm is hardcoded as excluded from the global sliding window filter.
-pub fn is_excluded_from_sliding_window(algorithm_name: &str) -> bool {
-    if crate::lib::excluded_algorithms_stable::is_stable_excluded(algorithm_name) {
-        return true;
-    }
-
-    #[cfg(has_experimental_exclusions)]
-    {
-        if crate::lib::excluded_algorithms_experimental::is_experimental_excluded(algorithm_name) {
-            return true;
-        }
-    }
-
-    false
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -591,7 +560,7 @@ mod tests {
 
         // 100% accuracy algorithms (stable) should NEVER be filtered, even as a single detection
         let dets = vec![
-            make_det(1000, 1, "nocrex/oob_pitch"),
+            make_det(1000, 1, "skiesred/oob_pitch"),
             make_det(2000, 2, "fidoo/invalid_equip_region"),
         ];
 
@@ -611,7 +580,7 @@ mod tests {
         // Player 1 has 1 oob_pitch detection and 1 un-excluded isolated detection.
         // Because oob_pitch is excluded (and qualifies player 1), all detections on player 1 are kept.
         let dets = vec![
-            make_det(1000, 1, "nocrex/oob_pitch"),
+            make_det(1000, 1, "skiesred/oob_pitch"),
             make_det(50000, 1, "some_aimbot"),
             make_det(1000, 2, "some_aimbot"), // player 2 has only 1 isolated non-excluded detection -> filtered out
         ];
@@ -675,7 +644,7 @@ mod tests {
         assert_eq!(GeneralSettings::from_parameters(&gen), GeneralSettings::default());
     }
 
-    #[cfg(has_experimental_exclusions)]
+    #[cfg(feature = "experimental")]
     #[test]
     fn test_experimental_excluded_algorithms() {
         let settings = GeneralSettings {

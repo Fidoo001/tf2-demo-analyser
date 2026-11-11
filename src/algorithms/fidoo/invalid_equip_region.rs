@@ -80,12 +80,13 @@ impl InvalidEquipRegion {
 }
 
 impl<'a> CheatAlgorithm<'a> for InvalidEquipRegion {
-    fn default(&self) -> bool {
-        true
-    }
-
     fn algorithm_name(&self) -> &str {
         "fidoo/invalid_equip_region"
+    }
+
+    // Never hidden by the global sliding window: 100% accuracy, a single detection is proof
+    fn excluded_from_sliding_window(&self) -> bool {
+        true
     }
 
     fn tooltip(&self) -> &'static str {

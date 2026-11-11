@@ -340,10 +340,6 @@ impl SilentAim {
 }
 
 impl<'a> CheatAlgorithm<'a> for SilentAim {
-    fn default(&self) -> bool {
-        true
-    }
-
     fn algorithm_name(&self) -> &str {
         "fidoo/silent_aim"
     }

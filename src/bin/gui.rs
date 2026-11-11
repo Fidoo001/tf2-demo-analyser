@@ -8,7 +8,7 @@ use analysis_template::{
     header_view::HeaderWindow,
     playerlist_view::{PlayerHighlights, PlayerlistWindow, TagHighlight},
     lib::{
-        algorithm::{analyse_bytes_with_settings, get_algorithms, is_experimental_algorithm_name, algorithm_tooltip, CheatAlgorithm, Detection},
+        algorithm::{analyse_bytes_with_settings, get_algorithms, is_experimental_algorithm_name, CheatAlgorithm, Detection},
         general_settings::{format_hex_rgb, parse_hex_rgb, ColorSettings, GeneralSettings, UiScaleSettings},
         live_scan::LiveRescan,
         parameters::{strip_session_only_parameters, Parameter, Parameters},
@@ -81,6 +81,7 @@ fn main() {
             }
             println!("Calling Gui::new()...");
             let gui = Gui::new();
+            gui.start_update_check(cc.egui_ctx.clone());
             cc.egui_ctx.set_zoom_factor(gui.applied_ui_scale as f32 / 100.0);
             if let Some(ref file) = log_file_clone {
                 let _ = std::fs::write(file, "Gui::new() created successfully\n");
@@ -491,6 +492,63 @@ const MAX_RECENT_FILES: usize = 10;
 /// Window size (in points) at 100% UI scale, which is also the minimum window size.
 const BASE_WINDOW_SIZE: egui::Vec2 = egui::vec2(624.0, 800.0);
 
+/// Version of this build, compared against the latest GitHub release. `release_to_github.py` sets
+/// `TF2DA_VERSION` to the release tag; other builds use the Cargo package version.
+const APP_VERSION: &str = match option_env!("TF2DA_VERSION") {
+    Some(version) => version,
+    None => env!("CARGO_PKG_VERSION"),
+};
+const LATEST_RELEASE_URL: &str = "https://api.github.com/repos/Fidoo001/tf2-demo-analyser/releases/latest";
+
+/// A GitHub release newer than this build.
+struct AvailableUpdate {
+    title: String,
+    tag: String,
+    url: String,
+}
+
+/// Numeric components of a version tag (`v1.2.0` -> [1, 2, 0]); pre-release/build suffixes ignored.
+fn parse_version(tag: &str) -> Option<Vec<u64>> {
+    let core = tag.trim().trim_start_matches(['v', 'V']);
+    let core = core.split(['-', '+']).next()?;
+    core.split('.').map(|part| part.parse().ok()).collect()
+}
+
+/// Whether `remote` is a strictly newer version than `local` (missing components count as 0).
+fn is_newer_version(remote: &str, local: &str) -> bool {
+    let (Some(mut remote), Some(mut local)) = (parse_version(remote), parse_version(local)) else {
+        return false;
+    };
+    let len = remote.len().max(local.len());
+    remote.resize(len, 0);
+    local.resize(len, 0);
+    remote > local
+}
+
+/// Asks GitHub for the latest published release (drafts and pre-releases are excluded by the
+/// endpoint). Any failure (offline, rate limit, bad JSON) just means no notification.
+fn fetch_available_update() -> Option<AvailableUpdate> {
+    let resp = ureq::get(LATEST_RELEASE_URL)
+        .set("Accept", "application/vnd.github+json")
+        .set("User-Agent", "tf2-demo-analyser-update-check")
+        .timeout(std::time::Duration::from_secs(10))
+        .call()
+        .ok()?;
+    let release: serde_json::Value = serde_json::from_str(&resp.into_string().ok()?).ok()?;
+    let tag = release.get("tag_name")?.as_str()?.to_string();
+    if !is_newer_version(&tag, APP_VERSION) {
+        return None;
+    }
+    let url = release.get("html_url")?.as_str()?.to_string();
+    let title = release
+        .get("name")
+        .and_then(|n| n.as_str())
+        .filter(|n| !n.trim().is_empty())
+        .unwrap_or(&tag)
+        .to_string();
+    Some(AvailableUpdate { title, tag, url })
+}
+
 struct Gui {
     algos: HashMap<String, bool>,
     params: HashMap<String, Parameters>,
@@ -582,6 +640,8 @@ struct Gui {
     applied_ui_scale: i32,
     /// Window size (in points) to restore once a changed zoom factor has taken effect.
     pending_window_resize: Option<egui::Vec2>,
+    /// Filled by the startup update check when a newer GitHub release exists.
+    available_update: std::sync::Arc<std::sync::OnceLock<AvailableUpdate>>,
 }
 
 struct AnalysisJob {
@@ -597,6 +657,17 @@ struct AnalysisJob {
 
 
 impl Gui {
+    /// Checks GitHub for a newer release in the background; repaints once one is found.
+    fn start_update_check(&self, ctx: egui::Context) {
+        let slot = self.available_update.clone();
+        std::thread::spawn(move || {
+            if let Some(update) = fetch_available_update() {
+                let _ = slot.set(update);
+                ctx.request_repaint();
+            }
+        });
+    }
+
     fn params_path() -> std::path::PathBuf {
         if let Ok(mut exe_path) = std::env::current_exe() {
             exe_path.pop();
@@ -937,8 +1008,8 @@ impl Gui {
 
         let algos =HashMap::from_iter(
             get_algorithms()
-                .iter()
-                .map(|a| {
+                .into_iter()
+                .map(|mut a| {
                     let name = a.algorithm_name().to_string();
                     let enabled = params
                         .get(&name)
@@ -946,7 +1017,7 @@ impl Gui {
                             Some(Parameter::Bool(b)) => Some(*b),
                             _ => None,
                         })
-                        .unwrap_or_else(|| a.default());
+                        .unwrap_or_else(|| a.default_enabled());
                     (name, enabled)
                 }),
         );
@@ -1274,6 +1345,7 @@ impl Gui {
             applied_colors: None,
             applied_ui_scale: ui_scale,
             pending_window_resize: None,
+            available_update: std::sync::Arc::new(std::sync::OnceLock::new()),
         };
         *gui.saved_state.borrow_mut() = gui.snapshot_data();
         gui
@@ -2126,6 +2198,18 @@ impl Gui {
             search.is_empty() || texts.iter().any(|t| t.to_lowercase().contains(&search))
         };
 
+        // Separate bottom row under the detections, only when a newer release exists. Added before the
+        // central panel so it keeps its space and stays clickable during scans and open subwindows.
+        if let Some(update) = self.available_update.get() {
+            egui::TopBottomPanel::bottom("update_notification").show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Update available:");
+                    ui.hyperlink_to(format!("{} ({})", update.title, update.tag), &update.url)
+                        .on_hover_text(format!("Open the release page (current version: {APP_VERSION})"));
+                });
+            });
+        }
+
         egui::CentralPanel::default().show(ctx, |ui| {
             if has_open_subwindow {
                 ui.disable();
@@ -2155,7 +2239,7 @@ impl Gui {
                             let enabled = *algo.1;
                             ui.horizontal(|ui| {
                                 let mut cb = ui.checkbox(&mut algo.1, algo.0);
-                                if let Some(tip) = self.algo_tooltips.get(algo.0).copied().or_else(|| algorithm_tooltip(algo.0)) {
+                                if let Some(tip) = self.algo_tooltips.get(algo.0).copied() {
                                     cb = cb.on_hover_text(tip);
                                 }
                                 if cb.changed() {
@@ -2180,7 +2264,7 @@ impl Gui {
                                 let enabled = *algo.1;
                                 ui.horizontal(|ui| {
                                     let mut cb = ui.checkbox(&mut algo.1, algo.0);
-                                    if let Some(tip) = self.algo_tooltips.get(algo.0).copied().or_else(|| algorithm_tooltip(algo.0)) {
+                                    if let Some(tip) = self.algo_tooltips.get(algo.0).copied() {
                                         cb = cb.on_hover_text(tip);
                                     }
                                     if cb.changed() {
@@ -2589,7 +2673,7 @@ impl Gui {
                                 heading.scroll_to_me(Some(egui::Align::TOP));
                                 self.scroll_to_algo = None;
                             }
-                            if let Some(tip) = self.algo_tooltips.get(name).copied().or_else(|| algorithm_tooltip(name)) {
+                            if let Some(tip) = self.algo_tooltips.get(name).copied() {
                                 heading = heading.on_hover_text(tip);
                             }
                             ui.separator();

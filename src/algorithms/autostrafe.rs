@@ -662,10 +662,6 @@ impl<'a> CheatAlgorithm<'a> for AutoStrafe {
         true
     }
 
-    fn default(&self) -> bool {
-        true
-    }
-
     fn tooltip(&self) -> &'static str {
         "Detects directional auto-strafe used to gain speed or better mid-air control"
     }

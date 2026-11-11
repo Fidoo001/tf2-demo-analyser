@@ -1103,16 +1103,21 @@ pub fn unit_features(flights: &[FlightRecord], total_flips: u32, total_samples: 
 }
 
 impl<'a> CheatAlgorithm<'a> for MlAutoStrafe {
-    fn default(&self) -> bool {
-        true
-    }
-
     fn needs_whole_demo(&self) -> bool {
         true
     }
 
     fn algorithm_name(&self) -> &str {
         ALGORITHM_NAME
+    }
+
+    fn tooltip(&self) -> &'static str {
+        "Scores each player's flights over the whole demo with a learned model of autostrafe: speed gain and turning under a still view at the rate of a perpendicular wish direction, tick by tick velocity kicks, and whether the movement keys can explain the velocity at the eye angles."
+    }
+
+    // Never hidden by the global sliding window: aggregates its evidence per player over the whole demo
+    fn excluded_from_sliding_window(&self) -> bool {
+        true
     }
 
     fn params(&mut self) -> Option<&mut Parameters> {

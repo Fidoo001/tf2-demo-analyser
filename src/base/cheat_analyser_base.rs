@@ -960,7 +960,7 @@ impl MessageHandler for CheatAnalyser<'_> {
                     );
                     if event.network_id != "BOT".into() {
                         let steamid = SteamID::from_steam3(event.network_id.to_string().as_str());
-                        let steamid64 = u64::from(steamid.unwrap_or(0.into()));
+                        let steamid64 = steamid.map(u64::from).unwrap_or(0);
                         self.state
                             .set_userid_to_id64(event.user_id.into(), steamid64);
                     }

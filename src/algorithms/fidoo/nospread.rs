@@ -347,10 +347,6 @@ impl NoSpread {
 }
 
 impl<'a> CheatAlgorithm<'a> for NoSpread {
-    fn default(&self) -> bool {
-        true
-    }
-
     fn algorithm_name(&self) -> &str {
         "fidoo/nospread"
     }

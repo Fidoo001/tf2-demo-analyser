@@ -235,7 +235,7 @@ fn prepare_algorithms(
 ) -> Vec<Box<dyn CheatAlgorithm<'static> + Send>> {
     let mut algorithms: Vec<Box<dyn CheatAlgorithm<'static> + Send>> = get_algorithms();
     if specified_algorithms.is_empty() {
-        algorithms.retain(|a| {
+        algorithms.retain_mut(|a| {
             if let Some(ref cfg) = config {
                 if let Some(algo_cfg) = cfg.get(a.algorithm_name()) {
                     if let Some(Parameter::Bool(b)) = algo_cfg.get("enabled") {
@@ -243,7 +243,7 @@ fn prepare_algorithms(
                     }
                 }
             }
-            a.default()
+            a.default_enabled()
         });
     } else {
         algorithms.retain(|a| specified_algorithms.contains(&a.algorithm_name().to_string()));
@@ -318,7 +318,7 @@ fn print_algorithms_list(
             proven_count += 1;
             "proven"
         };
-        let default_enabled = algo.default();
+        let default_enabled = algo.default_enabled();
         let configured_enabled = config.as_ref().and_then(|cfg| {
             cfg.get(&name).and_then(|p| {
                 if let Some(Parameter::Bool(b)) = p.get("enabled") {

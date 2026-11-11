@@ -5,43 +5,11 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use crate::base::cheat_analyser_base::CheatAnalyser;
-use crate::lib::algorithm::{analyse_bytes_from_tick, CheatAlgorithm, Detection};
+use crate::lib::algorithm::{analyse_bytes_from_tick, is_skipped_in_live_scan, CheatAlgorithm, Detection};
 use crate::lib::general_settings::GeneralSettings;
 
 /// Seconds between periodic live scans unless the user sets another interval.
 pub const DEFAULT_LIVE_SCAN_INTERVAL_SECONDS: u64 = 30;
-
-/// Algorithms the live scanner never runs: they look for a manipulated demo or for the POV
-/// recorder's own cheats (its usercmds, convars and screen), which says nothing about the other
-/// players on the server. All demoswap and recorder algorithms are skipped as well.
-const LIVE_SCAN_SKIPPED_ALGORITHMS: &[&str] = &[
-    // Demo manipulation
-    "tampered",
-    "demo_integrity",
-    "demo_exploit",
-    "stripped_demo",
-    "forged_viewangles",
-    // Cheats used by the recorder
-    "lboxaimbot",
-    "amalgam_aimbot",
-    "amalgam_triggerbot",
-    "j_backtrack",
-    "sv_cheats_bypass",
-    "triggerbot_double_inputs",
-    "suspicious_motd",
-];
-
-/// Whether the live scanner skips the algorithm.
-pub fn is_skipped_in_live_scan(algorithm_name: &str) -> bool {
-    let short_name = algorithm_name
-        .strip_prefix("fidoo/")
-        .or_else(|| algorithm_name.strip_prefix("nocrex/"))
-        .unwrap_or(algorithm_name);
-    let lower = algorithm_name.to_ascii_lowercase();
-    LIVE_SCAN_SKIPPED_ALGORITHMS.contains(&short_name)
-        || lower.contains("demoswap")
-        || lower.contains("recorder")
-}
 
 /// A scan ends with detections that a spawn or teleport right after it may still retract (60
 /// ticks) and launches that still wait for their lookaround. Each live scan therefore takes over
@@ -256,8 +224,8 @@ impl LiveRescan {
         // The live scanner continues without the algorithms it skips
         let mut algorithm_names: Vec<String> = algorithms
             .iter()
+            .filter(|a| !a.skipped_in_live_scan())
             .map(|a| a.algorithm_name().to_string())
-            .filter(|name| !is_skipped_in_live_scan(name))
             .collect();
         algorithm_names.sort();
 
@@ -319,6 +287,8 @@ mod tests {
         assert_eq!(analysed_until(&analyser), None);
     }
 
+    // The skipped algorithms are all experimental
+    #[cfg(feature = "experimental")]
     #[test]
     fn test_skipped_algorithms() {
         for name in [

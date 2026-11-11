@@ -101,10 +101,6 @@ impl BunnyHop {
 }
 
 impl<'a> CheatAlgorithm<'a> for BunnyHop {
-    fn default(&self) -> bool {
-        true
-    }
-
     fn algorithm_name(&self) -> &str {
         "fidoo/bunnyhop"
     }

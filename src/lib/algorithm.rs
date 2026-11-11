@@ -1,5 +1,5 @@
 use anyhow::Error;
-use crate::{base::cheat_analyser_base::CheatAnalyserState, lib::parameters::Parameters};
+use crate::{base::cheat_analyser_base::CheatAnalyserState, lib::parameters::{Parameter, Parameters}};
 use bitbuffer::BitRead;
 use serde_json::Value;
 use serde::{Deserialize, Serialize};
@@ -46,40 +46,6 @@ pub fn is_experimental_algorithm_name(name: &str) -> bool {
     get_experimental_algorithms()
         .iter()
         .any(|a| a.algorithm_name() == name)
-}
-
-/// Returns a short tooltip explaining an algorithm's purpose, if known.
-pub fn algorithm_tooltip(name: &str) -> Option<&'static str> {
-    match name {
-        "autostrafe" => Some("Detects directional auto-strafe where velocity curves or accelerates mid-air while view angles remain still."),
-        "viewangles_180degrees" => Some("Detects instant 180-degree viewangle flips in a single tick (anti-aim, snap aimbots, or turn-around scripts)."),
-        "fidoo/auto_backstab" => Some("Detects automated Spy backstabs, including impossible face-stabs, extended backtrack knife hits, and level-pitch snap aimbots."),
-        "fidoo/bunnyhop" => Some("Detects automated bunnyhopping (auto-bhop) by tracking consecutive perfect 1-tick ground jumps and zero-tick bounce streaks."),
-        "fidoo/duckspeed" => Some("Detects DuckSpeed / FastCrouch exploits where players move at unreduced walking or running speeds while fully crouched."),
-        "fidoo/invalid_equip_region" => Some("Detects impossible cosmetic loadouts, including conflicting equip regions and stacking more than three cosmetic items."),
-        "fidoo/nospread" => Some("Detects No-Spread cheats on hitscan weapons by analyzing inverted spread angle offsets and rapid firing jitter."),
-        "fidoo/plain_aimbot" => Some("Detects visible aimbot behavior, including single-tick snaps onto targets, sharp corner transitions, and continuous tracking locks."),
-        "fidoo/ml_aimbot" => Some("Scores each player's hitscan hits over the whole demo with a learned model (snaps, jerk, stillness, tracking) and marks the most aimbot-like hits of high-scoring players."),
-        "fidoo/ml_triggerbot" => Some("Scores each sniper's scoped rifle shots over the whole demo with a learned model of triggerbot use (exact sniper dot aim: crosshair swept or zigzagged over the head and fired mid-motion, high hit rate without aimbot snaps) and marks the most triggerbot-like hits."),
-        "fidoo/ml_autobackstab" => Some("Scores each spectated spy's backstabs over the whole demo with a learned model of auto backstab use (stab on the first possible tick without raising the knife, view snapping onto the victim's origin, level pitch, backtracked records) and marks the most auto-backstab-like stabs."),
-        "fidoo/ml_backtrack" => Some("Scores each player's sniper rifle and revolver hits over the whole demo with a learned model of hitscan backtrack use (hits only possible at a lag compensation rewind several ticks away from the player's typical one, typical rewind far above the scoreboard ping) and marks the most backtracked hits."),
-        "fidoo/high_hit_rate" => Some("Flags snipers who hit an impossible share of their rifle shots over the demo, once per player. The tick is only an example of the player's hits."),
-        "fidoo/ml_sniperaim" => Some("Scores each sniper's server-confirmed rifle headshots over the whole demo with a learned model of low FOV silent aimbot use (exact sniper dot aim leaves the player's mouse path for the shot update and comes back, whether the mouse is held still or sweeping, far beyond the player's own jitter) and marks the most silent-aim-like headshots."),
-        "fidoo/ml_psilent" => Some("Scores each player's projectile launches over the whole demo with a learned model of projectile silent aim: a launch direction that no view on the player's networked view path can produce, accounting for the muzzle offset, with update gaps and turn speed deciding what lag or a hidden flick can explain."),
-        "fidoo/ml_autostrafe" => Some("Scores each player's flights over the whole demo with a learned model of autostrafe: speed gain and turning under a still view at the rate of a perpendicular wish direction, tick by tick velocity kicks, and whether the movement keys can explain the velocity at the eye angles."),
-        "fidoo/ml_silent_aim" => Some("Scores each player's hitscan hits over the whole demo with a learned model of silent aim: a one-update out-and-back flick of the eye angles on the bullet, against the player's own jitter and update gaps, including small low FOV flicks and flicks to backtracked positions."),
-        "fidoo/ml_wallhack" => Some("Scores each player over the whole demo with a learned model of wallhack and ESP tracking (dynamic crosshair correlation with moving occluded enemies, time-shift permutation null test, first-visibility emergence errors, and tracking of completely invisible spies) and marks the most suspicious tracking episodes."),
-        "fidoo/ml_plain_projectile" => Some("Scores each player's projectile launches and flame hits over the whole demo with a learned model of plain aimbot (ballistic arc lead extrapolation, direct vs. lead angular error, instant counterstrafe reaction snaps) and marks the most aimbot-like events."),
-        "fidoo/psilent5" => Some("Detects Projectile Silent Aim (pSilent) by measuring angular discrepancies between projectile launch vectors and view angles."),
-        "fidoo/pyro_aimbot" => Some("Detects Flame Thrower aimbots by tracking rapid alternating viewangle snaps between mouse aim and target lead positions."),
-        "fidoo/silent_aim" => Some("Detects silent aim snapbacks (A -> B -> C flick-and-return) where view angles snap to a target on the attack tick and instantly restore."),
-        "fidoo/sniperaim" => Some("Detects low-FOV Sniper aimbots on scoped rifle shots by analyzing sniper laser dot movement and headshot angle jumps."),
-        "nocrex/oob_pitch" => Some("Detects out-of-bounds pitch angles outside [-89°, +89°] (anti-aim / upside-down pitch) that distort player hitboxes."),
-        "angle_history" => Some("Detects 1-tick aimbot flick-and-return snapbacks using historical viewangle comparisons across ticks."),
-        "nocrex/aimsnap" => Some("Detects large, unnatural single-tick angular snaps towards target hitboxes."),
-        "nocrex/angle_repeat" => Some("Detects identical repeating viewangles that indicate mechanical or scripted mouse movements."),
-        _ => None,
-    }
 }
 
 use crate::lib::general_settings::GeneralSettings;
@@ -329,18 +295,73 @@ pub fn analyse_sequential_with_worker_id_from_tick<'a>(
     Ok(handler.analyser)
 }
 
-pub trait CheatAlgorithm<'a> {
-    fn default(&self) -> bool {
-        panic!("default() not set for {}", std::any::type_name::<Self>());
-    }
+/// Per-algorithm flags that are looked up by detection name (`Detection::algorithm`).
+struct AlgorithmFlags {
+    excluded_from_sliding_window: bool,
+    skipped_in_live_scan: bool,
+}
 
+/// Flags of every algorithm in this build, collected once from the algorithms themselves.
+fn algorithm_flags() -> &'static std::collections::HashMap<String, AlgorithmFlags> {
+    static FLAGS: std::sync::OnceLock<std::collections::HashMap<String, AlgorithmFlags>> = std::sync::OnceLock::new();
+    FLAGS.get_or_init(|| {
+        get_algorithms()
+            .iter()
+            .map(|a| {
+                let flags = AlgorithmFlags {
+                    excluded_from_sliding_window: a.excluded_from_sliding_window(),
+                    skipped_in_live_scan: a.skipped_in_live_scan(),
+                };
+                (a.algorithm_name().to_string(), flags)
+            })
+            .collect()
+    })
+}
+
+/// Whether detections of the named algorithm are never hidden by the global sliding window
+/// filter (see `CheatAlgorithm::excluded_from_sliding_window`). Unknown names are not excluded.
+pub fn is_excluded_from_sliding_window(algorithm_name: &str) -> bool {
+    algorithm_flags()
+        .get(algorithm_name)
+        .is_some_and(|f| f.excluded_from_sliding_window)
+}
+
+/// Whether the live scanner skips the named algorithm (see `CheatAlgorithm::skipped_in_live_scan`).
+pub fn is_skipped_in_live_scan(algorithm_name: &str) -> bool {
+    algorithm_flags()
+        .get(algorithm_name)
+        .is_some_and(|f| f.skipped_in_live_scan)
+}
+
+pub trait CheatAlgorithm<'a> {
     fn algorithm_name(&self) -> &str {
         panic!("algorithm_name() not implemented for {}", std::any::type_name::<Self>());
     }
 
+    /// Whether the algorithm runs when no params.json says otherwise: the default value of its
+    /// `enabled` parameter, which is the only place the default is set.
+    fn default_enabled(&mut self) -> bool {
+        matches!(self.params().and_then(|p| p.get("enabled")), Some(Parameter::Bool(true)))
+    }
+
+    // Return true if the global sliding window filter must never hide the algorithm's
+    // detections: a single detection is proof (100% accuracy), the algorithm already aggregates
+    // its evidence per player over the whole demo, or it detects a manipulated demo or the POV
+    // recorder's own cheats.
+    fn excluded_from_sliding_window(&self) -> bool {
+        false
+    }
+
+    // Return true if live scans never run the algorithm: it looks for a manipulated demo or for
+    // the POV recorder's own cheats (its usercmds, convars and screen), which says nothing about
+    // the other players on the server.
+    fn skipped_in_live_scan(&self) -> bool {
+        false
+    }
+
     /// Short tooltip or description explaining the algorithm's purpose in the UI / CLI.
     fn tooltip(&self) -> &'static str {
-        algorithm_tooltip(self.algorithm_name()).unwrap_or("")
+        ""
     }
 
     fn params(&mut self) -> Option<&mut Parameters>{
@@ -441,13 +462,11 @@ mod tests {
 
     #[test]
     fn test_all_default_stable_algorithms_have_tooltips() {
-        let proven = get_proven_algorithms();
-        for algo in &proven {
-            if algo.default() {
-                let name = algo.algorithm_name();
+        let mut proven = get_proven_algorithms();
+        for algo in proven.iter_mut() {
+            if algo.default_enabled() {
                 let tip = algo.tooltip();
-                assert!(!tip.is_empty(), "Stable algorithm '{}' is enabled by default but has no tooltip", name);
-                assert!(algorithm_tooltip(name).is_some(), "algorithm_tooltip('{}') returned None", name);
+                assert!(!tip.is_empty(), "Stable algorithm '{}' is enabled by default but has no tooltip", algo.algorithm_name());
             }
         }
     }

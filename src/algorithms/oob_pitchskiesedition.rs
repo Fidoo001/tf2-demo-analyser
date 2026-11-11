@@ -48,12 +48,13 @@ impl OOBPitch {
 }
 
 impl<'a> CheatAlgorithm<'a> for OOBPitch {
-    fn default(&self) -> bool {
-        true
-    }
-
     fn algorithm_name(&self) -> &str {
         "skiesred/oob_pitch"
+    }
+
+    // Never hidden by the global sliding window: 100% accuracy, a single detection is proof
+    fn excluded_from_sliding_window(&self) -> bool {
+        true
     }
 
     fn tooltip(&self) -> &'static str {

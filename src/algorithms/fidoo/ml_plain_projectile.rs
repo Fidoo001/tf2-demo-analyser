@@ -674,12 +674,13 @@ impl MlPlainProjectile {
 }
 
 impl<'a> CheatAlgorithm<'a> for MlPlainProjectile {
-    fn default(&self) -> bool {
-        true
-    }
-
     fn algorithm_name(&self) -> &str {
         "fidoo/ml_plain_projectile"
+    }
+
+    // Never hidden by the global sliding window: aggregates its evidence per player over the whole demo
+    fn excluded_from_sliding_window(&self) -> bool {
+        true
     }
 
     fn tooltip(&self) -> &'static str {

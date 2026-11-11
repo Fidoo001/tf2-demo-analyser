@@ -689,12 +689,17 @@ impl MlBacktrack {
 }
 
 impl<'a> CheatAlgorithm<'a> for MlBacktrack {
-    fn default(&self) -> bool {
-        false
-    }
-
     fn algorithm_name(&self) -> &str {
         "fidoo/ml_backtrack"
+    }
+
+    fn tooltip(&self) -> &'static str {
+        "Scores each player's sniper rifle and revolver hits over the whole demo with a learned model of hitscan backtrack use (hits only possible at a lag compensation rewind several ticks away from the player's typical one, typical rewind far above the scoreboard ping) and marks the most backtracked hits."
+    }
+
+    // Never hidden by the global sliding window: aggregates its evidence per player over the whole demo
+    fn excluded_from_sliding_window(&self) -> bool {
+        true
     }
 
     fn params(&mut self) -> Option<&mut Parameters> {

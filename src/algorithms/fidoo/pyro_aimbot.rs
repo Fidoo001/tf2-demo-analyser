@@ -415,10 +415,6 @@ impl PyroAimbot {
 }
 
 impl<'a> CheatAlgorithm<'a> for PyroAimbot {
-    fn default(&self) -> bool {
-        true
-    }
-
     fn algorithm_name(&self) -> &str {
         "fidoo/pyro_aimbot"
     }

@@ -48,6 +48,21 @@ const MIN_HITS_FOR_K: usize = 4;
 /// Ticks of target positions kept per shot
 const TRACK_WINDOW: u32 = AIM_WINDOW as u32 + MAX_K as u32 + 2;
 const HISTORY_TICKS: usize = 160;
+/// Shots are skipped while the shooter or the shot's target (re)entered PVS fewer than this many ticks ago:
+/// positions, angles and the dot are unreliable right after a player starts being transmitted again
+/// (same 60-tick window JankGuard users apply after spawns and teleports)
+pub const MIN_PVS_TICKS: u32 = 60;
+/// Map prefixes of the regular game modes. On other maps (trade, MGE, achievement / idle, jump, surf, ...)
+/// targets stand still or duel 1v1 and legit snipers reach triggerbot-like hit rates: out-of-fold flag
+/// rates were 10.5% on trade and 15.8% on MGE maps vs 1.9% on regular maps (docs/ml_triggerbot.md)
+pub const STANDARD_MAP_PREFIXES: [&str; 11] =
+    ["cp_", "ctf_", "pl_", "plr_", "koth_", "pd_", "sd_", "tc_", "arena_", "pass_", "rd_"];
+
+/// Whether the model scores demos on this map (unknown map names are scored)
+pub fn is_standard_map(map: &str) -> bool {
+    let m = map.trim_matches('\0').trim().to_ascii_lowercase();
+    m.is_empty() || STANDARD_MAP_PREFIXES.iter().any(|p| m.starts_with(p))
+}
 const HEAD_RADIUS: f32 = 6.0;
 /// Per-hit errors are clamped to this many head radii when estimating `k`
 const K_ERROR_CLAMP: f32 = 10.0;
@@ -145,6 +160,8 @@ struct Snap {
     ducking: bool,
     alive: bool,
     in_pvs: bool,
+    /// First tick of the current continuous PVS stretch
+    pvs_since: u32,
     team: Team,
     class: Class,
     cond: u32,
@@ -185,6 +202,8 @@ struct AimSample {
 #[derive(Clone, Debug)]
 struct TargetTrack {
     sid: u64,
+    /// Ticks since the target (re)entered PVS, at the shot
+    pvs_age: u32,
     head: Vec<(i32, [f32; 3])>,
 }
 
@@ -860,6 +879,12 @@ pub struct MlTriggerbot {
     pub shots: Vec<ShotFeatures>,
     /// Snipers with enough hits, filled by `finish`
     pub units: Vec<UnitRecord>,
+    /// Map of the demo once known; `Some(false)` = not a regular game mode map, nothing is scored
+    map_ok: Option<bool>,
+    map: String,
+    first_tick: u32,
+    /// Rifle shots per shooter entity on a skipped map (the warning needs a sniper worth checking)
+    skipped_shots: FxHashMap<u32, usize>,
 }
 
 impl Default for MlTriggerbot {
@@ -873,9 +898,10 @@ impl MlTriggerbot {
         Self {
             params: Parameters::from([
                 ("enabled".to_string(), Parameter::Bool(false)),
-                ("min_score".to_string(), Parameter::Float(0.33)),
+                ("min_score".to_string(), Parameter::Float(0.26)),
                 ("min_shots".to_string(), Parameter::Int(8)),
                 ("max_detections".to_string(), Parameter::Int(3)),
+                ("skip_nonstandard_maps".to_string(), Parameter::Bool(true)),
             ]),
             history: FxHashMap::default(),
             dots: FxHashMap::default(),
@@ -886,6 +912,10 @@ impl MlTriggerbot {
             shooters: FxHashMap::default(),
             shots: Vec::new(),
             units: Vec::new(),
+            map_ok: None,
+            map: String::new(),
+            first_tick: 0,
+            skipped_shots: FxHashMap::default(),
         }
     }
 
@@ -895,6 +925,7 @@ impl MlTriggerbot {
         if s0.class != Class::Sniper || !is_rifle(shot.weapon_id) {
             return;
         }
+
         let Some(shooter) = state.players.iter().find(|p| u32::from(p.entity) == shot.ent) else { return };
         let Some(sid) = player_sid(shooter, state) else { return };
 
@@ -926,6 +957,10 @@ impl MlTriggerbot {
             aim.push(AimSample { j, eye, yaw, pitch });
         }
         if aim.last().map_or(true, |a| a.j != 0) {
+            return;
+        }
+        // the shooter is out of PVS (stale eye position; the dot is transmitted on its own) or only just came in
+        if !s0.in_pvs || shot.tick.saturating_sub(s0.pvs_since) < MIN_PVS_TICKS {
             return;
         }
 
@@ -961,7 +996,7 @@ impl MlTriggerbot {
             if is_victim {
                 victim = Some(targets.len());
             }
-            targets.push(TargetTrack { sid, head });
+            targets.push(TargetTrack { sid, pvs_age: shot.tick.saturating_sub(t0.pvs_since), head });
         }
 
         // start of the current zoom
@@ -1005,12 +1040,17 @@ impl MlTriggerbot {
 }
 
 impl<'a> CheatAlgorithm<'a> for MlTriggerbot {
-    fn default(&self) -> bool {
-        false
-    }
-
     fn algorithm_name(&self) -> &str {
         "fidoo/ml_triggerbot"
+    }
+
+    fn tooltip(&self) -> &'static str {
+        "Scores each sniper's scoped rifle shots over the whole demo with a learned model of triggerbot use (exact sniper dot aim: crosshair swept or zigzagged over the head and fired mid-motion, high hit rate without aimbot snaps) and marks the most triggerbot-like hits."
+    }
+
+    // Never hidden by the global sliding window: aggregates its evidence per player over the whole demo
+    fn excluded_from_sliding_window(&self) -> bool {
+        true
     }
 
     fn params(&mut self) -> Option<&mut Parameters> {
@@ -1034,6 +1074,10 @@ impl<'a> CheatAlgorithm<'a> for MlTriggerbot {
     }
 
     fn on_message(&mut self, message: &Message, _state: &CheatAnalyserState, parser_state: &ParserState, tick: DemoTick) -> Result<Vec<Detection>, Error> {
+        // on a skipped map only rifle shots are counted
+        if self.map_ok == Some(false) && !matches!(message, Message::TempEntities(_)) {
+            return Ok(vec![]);
+        }
         let ticknum: u32 = tick.into();
         match message {
             Message::TempEntities(msg) => {
@@ -1112,6 +1156,19 @@ impl<'a> CheatAlgorithm<'a> for MlTriggerbot {
 
     fn on_tick(&mut self, state: &CheatAnalyserState, _: &ParserState) -> Result<Vec<Detection>, Error> {
         let ticknum = u32::from(state.tick);
+        if self.map_ok.is_none() {
+            if let Some(h) = state.header.as_ref() {
+                self.map = h.map.trim_matches('\0').trim().to_string();
+                self.first_tick = ticknum;
+                self.map_ok = Some(!get_parameter_value::<bool>(&self.params, "skip_nonstandard_maps") || is_standard_map(&self.map));
+            }
+        }
+        if self.map_ok == Some(false) {
+            for shot in self.pending.drain(..) {
+                *self.skipped_shots.entry(shot.ent).or_default() += 1;
+            }
+            return Ok(vec![]);
+        }
         for p in &state.players {
             let hist = self.history.entry(u32::from(p.entity)).or_default();
             if hist.back().is_some_and(|s| s.tick > ticknum) {
@@ -1120,6 +1177,10 @@ impl<'a> CheatAlgorithm<'a> for MlTriggerbot {
             if hist.back().is_some_and(|s| s.tick == ticknum) {
                 continue;
             }
+            let pvs_since = match hist.back() {
+                Some(prev) if p.in_pvs && prev.in_pvs => prev.pvs_since,
+                _ => ticknum,
+            };
             hist.push_back(Snap {
                 tick: ticknum,
                 pos: [p.position.x, p.position.y, p.position.z],
@@ -1128,6 +1189,7 @@ impl<'a> CheatAlgorithm<'a> for MlTriggerbot {
                 ducking: p.is_ducking(),
                 alive: p.state == PlayerState::Alive,
                 in_pvs: p.in_pvs,
+                pvs_since,
                 team: p.team,
                 class: p.class,
                 cond: p.cond,
@@ -1164,6 +1226,24 @@ impl<'a> CheatAlgorithm<'a> for MlTriggerbot {
     }
 
     fn finish(&mut self) -> Result<Vec<Detection>, Error> {
+        if self.map_ok == Some(false) {
+            let min_shots = get_parameter_value::<i32>(&self.params, "min_shots").max(1) as usize;
+            if self.skipped_shots.values().all(|&n| n < min_shots) {
+                return Ok(vec![]);
+            }
+            return Ok(vec![Detection {
+                tick: self.first_tick,
+                algorithm: "fidoo/ml_triggerbot".to_string(),
+                player: 0,
+                data: json!({
+                    "warning": format!(
+                        "not checked: {} is not a regular game mode map (trade, MGE and idle maps give legit snipers triggerbot-like hit rates); set skip_nonstandard_maps = false to score it anyway",
+                        self.map
+                    ),
+                    "map": self.map,
+                }),
+            }]);
+        }
         let min_score = get_parameter_value::<f32>(&self.params, "min_score");
         let min_shots = get_parameter_value::<i32>(&self.params, "min_shots").max(1) as usize;
         let max_detections = get_parameter_value::<i32>(&self.params, "max_detections").max(1) as usize;
@@ -1177,6 +1257,10 @@ impl<'a> CheatAlgorithm<'a> for MlTriggerbot {
             let k = estimate_k(&hits);
             let first = self.shots.len();
             for s in &data.shots {
+                // the target (victim, or the closest head of a miss) only just came into PVS
+                if s.target(k).is_some_and(|t| t.pvs_age < MIN_PVS_TICKS) {
+                    continue;
+                }
                 let Some(features) = s.features(k) else { continue };
                 let score = model.map_or(f32::NAN, |m| m.shot.probability(&features));
                 let victim = s.target(k).map_or(0, |t| t.sid);
@@ -1263,7 +1347,7 @@ mod tests {
             prev_tick: None,
             shooter_speed: 0.0,
             aim,
-            targets: vec![TargetTrack { sid: 1, head: (-70..=0).map(|j| (j, head)).collect() }],
+            targets: vec![TargetTrack { sid: 1, pvs_age: 1000, head: (-70..=0).map(|j| (j, head)).collect() }],
         }
     }
 
@@ -1289,6 +1373,13 @@ mod tests {
         let f = s.features(DEFAULT_K).unwrap();
         assert_eq!(f[IDX_READY_HOLD], 3.0);
         assert_eq!(f[IDX_READY_LATENCY], 3.0);
+    }
+
+    #[test]
+    fn map_filter() {
+        assert!(is_standard_map("plr_hightower") && is_standard_map("ctf_2fort\0\0") && is_standard_map(""));
+        assert!(!is_standard_map("trade_plaza4_portal4") && !is_standard_map("mge_training_v8_beta4b"));
+        assert!(!is_standard_map("achievement_idle_beta3") && !is_standard_map("2koth_trainyard"));
     }
 
     #[test]

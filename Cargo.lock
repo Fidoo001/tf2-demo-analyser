@@ -140,7 +140,7 @@ dependencies = [
 
 [[package]]
 name = "analysis-template"
-version = "0.1.0"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "bitbuffer",
@@ -159,7 +159,7 @@ dependencies = [
  "serde",
  "serde_json",
  "snap",
- "steamid-ng",
+ "steamid-ng 3.0.0",
  "tf-demo-parser",
  "unsafe-libopus",
  "ureq",
@@ -3453,6 +3453,8 @@ checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 [[package]]
 name = "steamid-ng"
 version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ffb049f8faa2cba570c5366dbaf88ee5849725b16edb771848639fac92e33673"
 dependencies = [
  "enum_primitive",
  "lazy_static",
@@ -3462,6 +3464,12 @@ dependencies = [
  "serde_derive",
  "thiserror 1.0.69",
 ]
+
+[[package]]
+name = "steamid-ng"
+version = "3.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d3ed9aa559d0d2d286dfe34f728d00232281da08f2c6a2eaf09f67f4899cfdb3"
 
 [[package]]
 name = "strict-num"
@@ -3615,7 +3623,7 @@ dependencies = [
  "serde_json",
  "serde_repr",
  "snap",
- "steamid-ng",
+ "steamid-ng 1.0.0",
  "thiserror 2.0.20",
 ]
 

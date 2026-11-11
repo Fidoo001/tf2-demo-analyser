@@ -498,12 +498,17 @@ impl MlAimbot {
 }
 
 impl<'a> CheatAlgorithm<'a> for MlAimbot {
-    fn default(&self) -> bool {
-        true
-    }
-
     fn algorithm_name(&self) -> &str {
         "fidoo/ml_aimbot"
+    }
+
+    fn tooltip(&self) -> &'static str {
+        "Scores each player's hitscan hits over the whole demo with a learned model (snaps, jerk, stillness, tracking) and marks the most aimbot-like hits of high-scoring players."
+    }
+
+    // Never hidden by the global sliding window: aggregates its evidence per player over the whole demo
+    fn excluded_from_sliding_window(&self) -> bool {
+        true
     }
 
     fn params(&mut self) -> Option<&mut Parameters> {

@@ -930,12 +930,17 @@ impl MlSilentAim {
 }
 
 impl<'a> CheatAlgorithm<'a> for MlSilentAim {
-    fn default(&self) -> bool {
-        true
-    }
-
     fn algorithm_name(&self) -> &str {
         "fidoo/ml_silent_aim"
+    }
+
+    fn tooltip(&self) -> &'static str {
+        "Scores each player's hitscan hits over the whole demo with a learned model of silent aim: a one-update out-and-back flick of the eye angles on the bullet, against the player's own jitter and update gaps, including small low FOV flicks and flicks to backtracked positions."
+    }
+
+    // Never hidden by the global sliding window: aggregates its evidence per player over the whole demo
+    fn excluded_from_sliding_window(&self) -> bool {
+        true
     }
 
     fn params(&mut self) -> Option<&mut Parameters> {
