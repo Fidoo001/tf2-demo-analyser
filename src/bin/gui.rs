@@ -8,7 +8,7 @@ use analysis_template::{
     header_view::HeaderWindow,
     playerlist_view::{PlayerHighlights, PlayerlistWindow, TagHighlight},
     lib::{
-        algorithm::{analyse_bytes_with_settings, get_algorithms, is_experimental_algorithm_name, CheatAlgorithm, Detection},
+        algorithm::{analyse_bytes_with_settings, analyse_with_settings, get_algorithms, is_experimental_algorithm_name, CheatAlgorithm, Detection},
         general_settings::{format_hex_rgb, parse_hex_rgb, ColorSettings, GeneralSettings, UiScaleSettings},
         live_scan::LiveRescan,
         parameters::{strip_session_only_parameters, Parameter, Parameters},
@@ -334,6 +334,306 @@ fn check_steam_account(steam_id: u64, backoff: &mut Option<std::time::Duration>)
     }
 }
 
+/// Counters of a running (or finished) bulk scan, shared between the scan thread and the UI.
+#[derive(Default)]
+struct BulkScanProgress {
+    total: std::sync::atomic::AtomicUsize,
+    done: std::sync::atomic::AtomicUsize,
+    flagged: std::sync::atomic::AtomicUsize,
+    failed: std::sync::atomic::AtomicUsize,
+    /// Demos skipped (and counted as clean) because they are not from a Valve server.
+    non_valve: std::sync::atomic::AtomicUsize,
+    finished: std::sync::atomic::AtomicBool,
+    cancel: std::sync::atomic::AtomicBool,
+    /// Why the scan could not start (missing folder, ...).
+    error: std::sync::Mutex<Option<String>>,
+    /// "demo: reason" for every demo that could not be analysed or moved.
+    failures: std::sync::Mutex<Vec<String>>,
+}
+
+/// Everything a bulk scan needs, copied from the GUI when it starts.
+struct BulkScanJob {
+    dir: std::path::PathBuf,
+    algos: HashMap<String, bool>,
+    params: HashMap<String, Parameters>,
+    reported_ids: HashSet<u64>,
+    ignore_marked: bool,
+    ignore_deleted: bool,
+    /// Sort the demos into `sus/` and `clean/`; otherwise they are only counted.
+    move_demos: bool,
+    /// Demos from non-Valve servers are not analysed and count as clean (CLI `--valve-only`).
+    valve_only: bool,
+    known_accounts: HashMap<u64, AccountStatus>,
+}
+
+/// State of the bulk scan modal.
+struct BulkScanUi {
+    open: bool,
+    ignore_deleted: bool,
+    ignore_marked: bool,
+    move_demos: bool,
+    valve_only: bool,
+    /// Folder to scan. Only lives for this session, never written to params.json.
+    dir: String,
+    /// The user typed or browsed a folder; it is no longer refilled from the TF2 folder.
+    dir_edited: bool,
+    progress: Option<std::sync::Arc<BulkScanProgress>>,
+}
+
+impl BulkScanUi {
+    fn new() -> Self {
+        Self {
+            open: false,
+            ignore_deleted: true,
+            ignore_marked: true,
+            move_demos: true,
+            valve_only: false,
+            dir: String::new(),
+            dir_edited: false,
+            progress: None,
+        }
+    }
+
+    fn is_running(&self) -> bool {
+        self.progress
+            .as_ref()
+            .is_some_and(|p| !p.finished.load(std::sync::atomic::Ordering::Relaxed))
+    }
+}
+
+/// Moves a demo, falling back to copy + delete across drives (same as the CLI bulk scan).
+fn move_demo_file(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    if src == dst {
+        return Ok(());
+    }
+    if dst.exists() {
+        let _ = std::fs::remove_file(dst);
+    }
+    if std::fs::rename(src, dst).is_err() {
+        std::fs::copy(src, dst)?;
+        std::fs::remove_file(src)?;
+    }
+    Ok(())
+}
+
+/// Analyses one demo of a bulk scan with the GUI's algorithms and parameters on the calling
+/// thread. A demo that makes the parser or an algorithm panic is reported as failed. With
+/// `valve_only`, a demo from a non-Valve server is not analysed and returns `None`.
+fn analyse_bulk_scan_demo(
+    path: &std::path::Path,
+    algos: &HashMap<String, bool>,
+    params: &HashMap<String, Parameters>,
+    general_settings: &GeneralSettings,
+    valve_only: bool,
+) -> Result<Option<Vec<Detection>>, String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("failed to read file: {e}"))?;
+    if valve_only {
+        let header = analysis_template::header_view::HeaderData::parse_bytes(&bytes, String::new())
+            .map_err(|e| format!("failed to read demo header: {e}"))?;
+        if !header.is_valve_server() {
+            return Ok(None);
+        }
+    }
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut algorithms = get_algorithms();
+        algorithms.retain(|a| algos.get(a.algorithm_name()).copied().unwrap_or(false));
+        for a in algorithms.iter_mut() {
+            if let Some(p) = params.get(a.algorithm_name()) {
+                if let Some(algo_params) = a.params() {
+                    algo_params.clone_from(p);
+                }
+            }
+        }
+        analyse_with_settings(&tf_demo_parser::Demo::new(&bytes), algorithms, general_settings)
+            .map(|analyser| Some(analyser.detections))
+            .map_err(|e| e.to_string())
+    }))
+    .unwrap_or_else(|panic| {
+        let msg = panic
+            .downcast_ref::<&str>()
+            .map(|s| s.to_string())
+            .or_else(|| panic.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "unknown panic".to_string());
+        Err(format!("analysis panicked (corrupted demo?): {msg}"))
+    })
+}
+
+/// Bulk scans the demos directly in `job.dir` like the CLI's `--bulk`: several demos are analysed
+/// at once (one thread each), and each demo is moved into `sus/` (renamed with its detection
+/// count) or `clean/`. Detections on marked cheaters and deleted accounts can be ignored.
+fn run_bulk_scan(job: BulkScanJob, progress: std::sync::Arc<BulkScanProgress>, ctx: egui::Context) {
+    use std::sync::atomic::Ordering;
+    let finish = |error: Option<String>| {
+        if let Some(e) = error {
+            *progress.error.lock().unwrap_or_else(|e| e.into_inner()) = Some(e);
+        }
+        progress.finished.store(true, Ordering::Relaxed);
+        ctx.request_repaint();
+    };
+
+    let entries = match std::fs::read_dir(&job.dir) {
+        Ok(entries) => entries,
+        Err(e) => return finish(Some(format!("Cannot read '{}': {e}", job.dir.display()))),
+    };
+    let mut demo_files: Vec<std::path::PathBuf> = entries
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| {
+            p.is_file()
+                && p.extension()
+                    .and_then(|e| e.to_str())
+                    .is_some_and(|e| e.eq_ignore_ascii_case("dem"))
+        })
+        .collect();
+    demo_files.sort();
+    let total = demo_files.len();
+    progress.total.store(total, Ordering::Relaxed);
+    if total == 0 {
+        return finish(Some(format!("No .dem files found directly in '{}'", job.dir.display())));
+    }
+
+    let sus_dir = job.dir.join("sus");
+    let clean_dir = job.dir.join("clean");
+    if job.move_demos {
+        for dir in [&sus_dir, &clean_dir] {
+            if let Err(e) = std::fs::create_dir_all(dir) {
+                return finish(Some(format!("Cannot create '{}': {e}", dir.display())));
+            }
+        }
+    }
+
+    let general_settings = GeneralSettings::from_config(&job.params);
+    let threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .min(total)
+        .max(1);
+    // The per-demo analyser output would interleave between the demos analysed at the same time
+    let was_silent = analysis_template::SILENT.swap(true, Ordering::Relaxed);
+    let next_demo = std::sync::atomic::AtomicUsize::new(0);
+
+    let mut accounts = job.known_accounts.clone();
+    let mut failed_lookups: HashMap<u64, std::time::Instant> = HashMap::new();
+    let mut last_request: Option<std::time::Instant> = None;
+    let mut backoff: Option<std::time::Duration> = None;
+    let mut is_deleted = |id: u64, cancel: &std::sync::atomic::AtomicBool| -> bool {
+        if id == 0 {
+            return false;
+        }
+        match accounts.get(&id) {
+            Some(AccountStatus::Deleted) => return true,
+            Some(AccountStatus::Exists) => return false,
+            _ => {}
+        }
+        if cancel.load(Ordering::Relaxed)
+            || failed_lookups.get(&id).is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(300))
+        {
+            return false;
+        }
+        const REQUEST_INTERVAL: std::time::Duration = std::time::Duration::from_millis(300);
+        if let Some(wait) = last_request.and_then(|t| REQUEST_INTERVAL.checked_sub(t.elapsed())) {
+            std::thread::sleep(wait);
+        }
+        let status = check_steam_account(id, &mut backoff);
+        last_request = Some(std::time::Instant::now());
+        if status == AccountStatus::Unknown {
+            failed_lookups.insert(id, std::time::Instant::now());
+        } else {
+            accounts.insert(id, status);
+        }
+        status == AccountStatus::Deleted
+    };
+    let add_failure = |name: &str, reason: String| {
+        progress.failed.fetch_add(1, Ordering::Relaxed);
+        progress
+            .failures
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(format!("{name}: {reason}"));
+    };
+
+    std::thread::scope(|s| {
+        let (result_send, result_recv) = std::sync::mpsc::channel();
+        for _ in 0..threads {
+            let result_send = result_send.clone();
+            let (next_demo, demo_files, job, general_settings, progress) =
+                (&next_demo, &demo_files, &job, &general_settings, &progress);
+            s.spawn(move || loop {
+                if progress.cancel.load(Ordering::Relaxed) {
+                    break;
+                }
+                let index = next_demo.fetch_add(1, Ordering::Relaxed);
+                let Some(path) = demo_files.get(index) else {
+                    break;
+                };
+                let result = analyse_bulk_scan_demo(path, &job.algos, &job.params, general_settings, job.valve_only);
+                if result_send.send((index, result)).is_err() {
+                    break;
+                }
+            });
+        }
+        drop(result_send);
+
+        for (index, result) in result_recv {
+            // Demos aborted by the cancellation are left where they are and not counted
+            if progress.cancel.load(Ordering::Relaxed) {
+                continue;
+            }
+            let path = &demo_files[index];
+            let name = path
+                .file_name()
+                .map(|f| f.to_string_lossy().to_string())
+                .unwrap_or_else(|| "unknown.dem".to_string());
+            match result {
+                Ok(detections) => {
+                    let detections = detections.unwrap_or_else(|| {
+                        progress.non_valve.fetch_add(1, Ordering::Relaxed);
+                        Vec::new()
+                    });
+                    let mut qualifying = 0;
+                    for d in &detections {
+                        let ignored = if job.reported_ids.contains(&d.player) {
+                            job.ignore_marked
+                        } else {
+                            job.ignore_deleted && is_deleted(d.player, &progress.cancel)
+                        };
+                        if !ignored {
+                            qualifying += 1;
+                        }
+                    }
+                    if progress.cancel.load(Ordering::Relaxed) {
+                        continue;
+                    }
+                    let dest = if !job.move_demos {
+                        path.clone()
+                    } else if qualifying > 0 {
+                        sus_dir.join(analysis_template::util::helpers::format_sus_demo_filename(&name, qualifying))
+                    } else {
+                        clean_dir.join(&name)
+                    };
+                    // Moving a demo onto itself does nothing, so unmoved demos are only counted
+                    match move_demo_file(path, &dest) {
+                        Ok(()) if qualifying > 0 => {
+                            progress.flagged.fetch_add(1, Ordering::Relaxed);
+                        }
+                        Ok(()) => {}
+                        Err(e) => add_failure(&name, format!("failed to move to '{}': {e}", dest.display())),
+                    }
+                }
+                Err(e) => add_failure(&name, e),
+            }
+            progress.done.fetch_add(1, Ordering::Relaxed);
+            ctx.request_repaint();
+        }
+    });
+
+    analysis_template::SILENT.store(was_silent, Ordering::Relaxed);
+    if progress.cancel.load(Ordering::Relaxed) {
+        // The cancellation belongs to the bulk scan, later analyses must not abort because of it
+        analysis_template::CANCEL_ANALYSIS.store(false, Ordering::Relaxed);
+    }
+    finish(None);
+}
+
 /// Maximum number of ticks listed per algorithm in the copied detections.
 const COPY_MAX_TICKS: usize = 20;
 
@@ -574,6 +874,7 @@ struct Gui {
     #[cfg(feature = "experimental")]
     voice_export_feedback: Option<(std::time::Instant, Result<analysis_template::util::voice::VoiceExportSummary, String>)>,
     show_delete_replays_prompt: bool,
+    bulk_scan: BulkScanUi,
     save_feedback: Option<(std::time::Instant, Result<(), String>)>,
     prev_demo: Option<std::path::PathBuf>,
     next_demo: Option<std::path::PathBuf>,
@@ -1295,6 +1596,7 @@ impl Gui {
             #[cfg(feature = "experimental")]
             voice_export_feedback: None,
             show_delete_replays_prompt: false,
+            bulk_scan: BulkScanUi::new(),
             save_feedback: None,
             prev_demo: None,
             next_demo: None,
@@ -1900,6 +2202,163 @@ impl Gui {
     }
 
 
+    /// Opens the bulk scan modal, filling the folder from the TF2 demos folder unless the user
+    /// picked another one this session.
+    fn open_bulk_scan(&mut self) {
+        let bulk = &mut self.bulk_scan;
+        if !bulk.is_running() && (!bulk.dir_edited || bulk.dir.trim().is_empty()) {
+            bulk.dir = analysis_template::util::helpers::find_default_tf2_dir()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            bulk.dir_edited = false;
+        }
+        bulk.open = true;
+    }
+
+    fn start_bulk_scan(&mut self, ctx: &egui::Context) {
+        let job = BulkScanJob {
+            dir: std::path::PathBuf::from(self.bulk_scan.dir.trim()),
+            algos: self.algos.clone(),
+            params: self.params.clone(),
+            reported_ids: self.reported_ids.clone(),
+            ignore_marked: self.bulk_scan.ignore_marked,
+            ignore_deleted: self.bulk_scan.ignore_deleted,
+            move_demos: self.bulk_scan.move_demos,
+            valve_only: self.bulk_scan.valve_only,
+            known_accounts: self.account_status.clone(),
+        };
+        let progress = std::sync::Arc::new(BulkScanProgress::default());
+        self.bulk_scan.progress = Some(progress.clone());
+        let ctx = ctx.clone();
+        let spawned = std::thread::Builder::new()
+            .name("bulk-scan".to_string())
+            .spawn({
+                let progress = progress.clone();
+                move || run_bulk_scan(job, progress, ctx)
+            });
+        if let Err(e) = spawned {
+            *progress.error.lock().unwrap_or_else(|e| e.into_inner()) = Some(format!("Failed to start the scan: {e}"));
+            progress.finished.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    fn show_bulk_scan_modal(&mut self, ctx: &egui::Context) {
+        use std::sync::atomic::Ordering;
+        if !self.bulk_scan.open {
+            return;
+        }
+        let running = self.bulk_scan.is_running();
+        let mut start = false;
+        let mut close = false;
+        let response = egui::Modal::new(egui::Id::new("bulk_scan_modal")).show(ctx, |ui| {
+            ui.set_width(420.0);
+            ui.heading("Bulk scan");
+            ui.label("Analyses every demo directly in the folder with the current settings.");
+            ui.add_space(6.0);
+            let bulk = &mut self.bulk_scan;
+            ui.add_enabled_ui(!running, |ui| {
+                ui.checkbox(&mut bulk.ignore_deleted, "Ignore deleted accounts")
+                    .on_hover_text("Detections on players whose Steam account no longer exists do not flag a demo");
+                ui.checkbox(&mut bulk.ignore_marked, "Ignore marked cheaters")
+                    .on_hover_text("Detections on players already in reported_ids.txt do not flag a demo");
+                ui.checkbox(&mut bulk.move_demos, "Move demos")
+                    .on_hover_text("Move each demo into the 'sus' (renamed with its detection count) or 'clean' subfolder. When off, demos are only counted and stay where they are.");
+                ui.checkbox(&mut bulk.valve_only, "Valve servers only")
+                    .on_hover_text("Demos from non-Valve servers are not analysed and count as clean");
+                ui.horizontal(|ui| {
+                    ui.label("Demo folder");
+                    let edit = ui.add(
+                        egui::TextEdit::singleline(&mut bulk.dir)
+                            .desired_width(230.0)
+                            .hint_text("Folder with .dem files"),
+                    );
+                    if edit.changed() {
+                        bulk.dir_edited = true;
+                    }
+                    edit.on_hover_text("Defaults to the TF2 demos folder. Changing it here is not saved to params.json.");
+                    if ui.button("Browse...").clicked() {
+                        let mut dialog = rfd::FileDialog::new();
+                        if std::path::Path::new(bulk.dir.trim()).is_dir() {
+                            dialog = dialog.set_directory(bulk.dir.trim());
+                        }
+                        if let Some(path) = dialog.pick_folder() {
+                            bulk.dir = path.to_string_lossy().into_owned();
+                            bulk.dir_edited = true;
+                        }
+                    }
+                });
+            });
+            ui.add_space(6.0);
+
+            if let Some(progress) = &bulk.progress {
+                let total = progress.total.load(Ordering::Relaxed);
+                let done = progress.done.load(Ordering::Relaxed);
+                let flagged = progress.flagged.load(Ordering::Relaxed);
+                let failed = progress.failed.load(Ordering::Relaxed);
+                let error = progress.error.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                if let Some(error) = error {
+                    ui.colored_label(ui.visuals().error_fg_color, error);
+                } else {
+                    let fraction = if total == 0 { 0.0 } else { done as f32 / total as f32 };
+                    ui.add(egui::ProgressBar::new(fraction).text(format!("{done} / {total} demos")));
+                    let state = if running {
+                        ""
+                    } else if progress.cancel.load(Ordering::Relaxed) {
+                        " (cancelled)"
+                    } else {
+                        " (finished)"
+                    };
+                    ui.label(format!("Flagged demos: {flagged}{state}"));
+                    let non_valve = progress.non_valve.load(Ordering::Relaxed);
+                    if non_valve > 0 {
+                        ui.label(format!("Skipped non-Valve servers: {non_valve} (counted as clean)"));
+                    }
+                    if failed > 0 {
+                        let failures = progress.failures.lock().unwrap_or_else(|e| e.into_inner());
+                        let shown = failures.iter().take(20).join("\n");
+                        let more = failures.len().saturating_sub(20);
+                        let tip = if more > 0 { format!("{shown}\n... and {more} more") } else { shown };
+                        ui.label(format!("Failed: {failed} (left in place)")).on_hover_text(tip);
+                    }
+                }
+                ui.add_space(6.0);
+            }
+
+            ui.horizontal(|ui| {
+                if running {
+                    let cancelling = bulk.progress.as_ref().is_some_and(|p| p.cancel.load(Ordering::Relaxed));
+                    let text = if cancelling { "Cancelling..." } else { "Cancel" };
+                    if ui.add_enabled(!cancelling, egui::Button::new(text)).clicked() {
+                        if let Some(p) = &bulk.progress {
+                            p.cancel.store(true, Ordering::Relaxed);
+                            // Aborts the demos being analysed right now
+                            analysis_template::CANCEL_ANALYSIS.store(true, Ordering::Relaxed);
+                        }
+                    }
+                } else {
+                    let dir_ok = std::path::Path::new(bulk.dir.trim()).is_dir();
+                    if ui
+                        .add_enabled(dir_ok && !self.processing, egui::Button::new("Start"))
+                        .on_disabled_hover_text("Select an existing demo folder")
+                        .clicked()
+                    {
+                        start = true;
+                    }
+                    if ui.button("Close").clicked() {
+                        close = true;
+                    }
+                }
+            });
+        });
+        // Escape / clicking outside closes the modal, but not while scanning
+        if close || (response.should_close() && !running) {
+            self.bulk_scan.open = false;
+        }
+        if start {
+            self.start_bulk_scan(ctx);
+        }
+    }
+
     fn analyse(&mut self, ctx: &egui::Context) {
         if self.file.is_none() {
             return;
@@ -2164,7 +2623,7 @@ impl Gui {
 
         #[allow(unused_mut)]
         let mut has_open_subwindow =
-            self.header_window.is_open || self.playerlist_window.is_open || self.chat_window.is_open;
+            self.header_window.is_open || self.playerlist_window.is_open || self.chat_window.is_open || self.bulk_scan.open;
         #[cfg(feature = "tf2bd")]
         {
             has_open_subwindow |= self.tf2bd.any_modal_open();
@@ -2931,8 +3390,9 @@ impl Gui {
                 });
             });
             ui.add_space(4.0);
-            ui.add_enabled_ui(self.file.is_some() && !self.processing, |ui| {
-                ui.horizontal(|ui| {
+            let demo_buttons_enabled = self.file.is_some() && !self.processing;
+            ui.horizontal(|ui| {
+                ui.add_enabled_ui(demo_buttons_enabled, |ui| {
                     if ui.add_enabled(self.prev_demo.is_some(), egui::Button::new("Previous demo")).clicked() {
                         self.update_adjacent_demos();
                         if let Some(prev_path) = self.prev_demo.clone() {
@@ -3020,6 +3480,16 @@ impl Gui {
                     if delete_btn.clicked() {
                         self.show_delete_replays_prompt = true;
                     }
+                });
+                // Usable without a loaded demo, so it sits outside the demo buttons' enabled scope
+                if ui
+                    .add_enabled(!self.processing, egui::Button::new("Bulk scan"))
+                    .on_hover_text("Analyse every demo in a folder and sort them into 'sus' and 'clean' subfolders")
+                    .clicked()
+                {
+                    self.open_bulk_scan();
+                }
+                ui.add_enabled_ui(demo_buttons_enabled, |ui| {
                     if self.show_strip_demo_button() {
                     let strip_btn_text = match &self.strip_feedback {
                         Some((t, Ok(count))) if t.elapsed().as_secs_f32() < 1.5 => {
@@ -3393,6 +3863,8 @@ impl Gui {
                 self.analyse(ctx);
             }
         }
+
+        self.show_bulk_scan_modal(ctx);
 
         if self.show_delete_replays_prompt {
             egui::Window::new("Delete all replays")
