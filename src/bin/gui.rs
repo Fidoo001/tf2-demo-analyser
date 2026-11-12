@@ -354,10 +354,12 @@ fn escape_markdown(text: &str) -> String {
 
 /// Formats detections as a compact markdown list: one block per player (most detections first)
 /// with the detection count per algorithm and the ticks of its first `COPY_MAX_TICKS` detections.
-/// Players in `reported_ids` get an "ALREADY MARKED" line at the top of their list.
+/// Players in `reported_ids` get an "ALREADY MARKED" line and players in `deleted_ids`
+/// (Steam account no longer exists) a "DELETED ACCOUNT" line at the top of their list.
 fn format_detections_markdown<'a>(
     detections: &HashMap<u64, Vec<Detection>>,
     reported_ids: &HashSet<u64>,
+    deleted_ids: &HashSet<u64>,
     player_name: impl Fn(u64) -> Option<&'a str>,
 ) -> String {
     let mut out = String::new();
@@ -374,6 +376,9 @@ fn format_detections_markdown<'a>(
         out.push_str(&format!("**{} - {}:**\n\n", escape_markdown(name), player));
         if reported_ids.contains(&player) {
             out.push_str("* ALREADY MARKED\n");
+        }
+        if deleted_ids.contains(&player) {
+            out.push_str("* DELETED ACCOUNT\n");
         }
         for (algorithm, mut ticks) in per_algorithm {
             ticks.sort_unstable();
@@ -2817,7 +2822,7 @@ impl Gui {
                         let (extension, contents) = if self.copy_detailed_detections() {
                             ("json", format_detections_json(&self.detections, |id| self.get_player_name(id)))
                         } else {
-                            ("md", format_detections_markdown(&self.detections, &self.reported_ids, |id| self.get_player_name(id)))
+                            ("md", format_detections_markdown(&self.detections, &self.reported_ids, &self.deleted_accounts, |id| self.get_player_name(id)))
                         };
                         let demo_stem = self
                             .file
@@ -2851,7 +2856,7 @@ impl Gui {
                         let (extension, markdown) = if detailed {
                             ("json", format_detections_json(&self.detections, |id| self.get_player_name(id)))
                         } else {
-                            ("md", format_detections_markdown(&self.detections, &self.reported_ids, |id| self.get_player_name(id)))
+                            ("md", format_detections_markdown(&self.detections, &self.reported_ids, &self.deleted_accounts, |id| self.get_player_name(id)))
                         };
                         let demo_stem = self
                             .file
@@ -3485,13 +3490,14 @@ mod tests {
             _ => None,
         };
         let reported: HashSet<u64> = [1].into_iter().collect();
-        let md = format_detections_markdown(&detections, &reported, names);
+        let deleted: HashSet<u64> = [3].into_iter().collect();
+        let md = format_detections_markdown(&detections, &reported, &deleted, names);
         let ticks_20 = (0..20).map(|i| (i * 10).to_string()).collect::<Vec<_>>().join(", ");
         let expected = format!(
             "**Unknown - 2:**\n\n* bhop_a (25) - {ticks_20}\n\n\
              **ANGRY\\_TOBUSCUS - 1:**\n\n* ALREADY MARKED\n* autostrafe (3) - 2186, 12514, 15261\n\
              * fidoo/psilent5 (2) - 3228, 4089\n\n\
-             **Unknown - 3:**\n\n* x (1) - 5\n"
+             **Unknown - 3:**\n\n* DELETED ACCOUNT\n* x (1) - 5\n"
         );
         assert_eq!(md, expected);
     }

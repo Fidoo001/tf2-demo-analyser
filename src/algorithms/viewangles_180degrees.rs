@@ -14,8 +14,16 @@ use crate::lib::parameters::{Parameter, Parameters};
 // Here we want to track the view angle and pitch angle of each player on the previous tick.
 // Later we will compare the previous and current view angles to see if they are 180 degrees apart.
 pub struct ViewAngles180Degrees {
-    previous: Option<CheatAnalyserState>,
+    /// Tick of the previous on_tick call and what it needs of that tick's players. Only these
+    /// fields are kept (cloning the whole state every tick was most of the algorithm's cost).
+    previous: Option<PreviousTick>,
     params: Parameters,
+}
+
+/// The previous tick's players that were in PVS and alive, in player order, with their eye angles.
+struct PreviousTick {
+    tick: u32,
+    players: Vec<(String, f32, f32)>,
 }
 
 // Then implement a pub fn new for your struct.
@@ -75,19 +83,14 @@ impl<'a> CheatAlgorithm<'a> for ViewAngles180Degrees {
                 if ticknum == 0 {
                     0
                 } else {
-                    ticknum - self.previous.as_ref().map_or(0, |pstate| pstate.tick.into())
+                    ticknum - self.previous.as_ref().map_or(0, |prev| prev.tick)
                 }
             };
 
             let (va_delta, pa_delta) = self.previous.as_ref()
-                .map_or((f32::NAN, f32::NAN), |prev_state| {
-                    match prev_state.players.iter().find(|p| {
-                        p.in_pvs && p.state == PlayerState::Alive &&
-                        p.info.as_ref().is_some_and(|i| i.steam_id == *steam_id)
-                    }) {
-                        Some(prev_player) => {
-                            let prev_viewangle = prev_player.view_angle;
-                            let prev_pitchangle = prev_player.pitch_angle;
+                .map_or((f32::NAN, f32::NAN), |prev| {
+                    match prev.players.iter().find(|(prev_steam_id, _, _)| prev_steam_id == steam_id) {
+                        Some(&(_, prev_viewangle, prev_pitchangle)) => {
                             viewangle_delta(player.view_angle, player.pitch_angle, prev_viewangle, prev_pitchangle, tick_delta)
                         },
                         None => (f32::NAN, f32::NAN)
@@ -112,7 +115,24 @@ impl<'a> CheatAlgorithm<'a> for ViewAngles180Degrees {
                 });
             }
         }
-        self.previous = Some(state.clone());
+        // Same players the lookup above accepts: in PVS, alive, with user info (kept in order so
+        // the first match wins as before). The buffer and its strings are reused between ticks.
+        let previous = self.previous.get_or_insert_with(|| PreviousTick { tick: 0, players: Vec::new() });
+        previous.tick = state.tick.into();
+        let mut kept = 0;
+        for p in players.iter().filter(|p| p.in_pvs && p.state == PlayerState::Alive) {
+            let Some(info) = &p.info else { continue };
+            if kept < previous.players.len() {
+                let entry = &mut previous.players[kept];
+                entry.0.clone_from(&info.steam_id);
+                entry.1 = p.view_angle;
+                entry.2 = p.pitch_angle;
+            } else {
+                previous.players.push((info.steam_id.clone(), p.view_angle, p.pitch_angle));
+            }
+            kept += 1;
+        }
+        previous.players.truncate(kept);
         // Any detections returned are official and final!
         // If you don't want to return any detections, just return an empty vector.
         // If your algorithm needs future ticks, you can store the detections within your algorithm's struct.

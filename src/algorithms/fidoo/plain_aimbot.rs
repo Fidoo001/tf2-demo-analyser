@@ -70,6 +70,8 @@ struct Sample {
     sim_tick: i64,
     yaw: f32,
     pitch: f32,
+    /// `view_dir(yaw, pitch)`, computed once per sample
+    dir: (f32, f32, f32),
     eye: Vector,
     team: u8,
     fired: bool,
@@ -134,7 +136,8 @@ pub struct PlainAimbot {
     jg: JankGuard,
     // Ordered by SteamID so targets are always tried in the same order (ties keep the first).
     players: BTreeMap<u64, PlayerData>,
-    weapon_models: HashMap<String, AimModel>,
+    /// Aim model and melee flag per weapon name (both depend on the name only)
+    weapon_models: HashMap<String, (AimModel, bool)>,
 }
 
 fn view_dir(yaw: f32, pitch: f32) -> (f32, f32, f32) {
@@ -160,7 +163,7 @@ fn angle_between(a: (f32, f32, f32), b: (f32, f32, f32)) -> f32 {
 }
 
 fn view_step(a: &Sample, b: &Sample) -> f32 {
-    angle_between(view_dir(a.yaw, a.pitch), view_dir(b.yaw, b.pitch))
+    angle_between(a.dir, b.dir)
 }
 
 /// Eye height of a player class (standing), ducking players use 45 units.
@@ -182,9 +185,9 @@ fn eye_position(player: &Player) -> Vector {
 }
 
 /// Angular error between the view ray and the closest point of the target's vertical column
-/// `[target.z + bottom, target.z + top]`, plus the distance to the target.
-fn column_error(eye: Vector, yaw: f32, pitch: f32, target: Vector, bottom: f32, top: f32) -> Option<(f32, f32)> {
-    let dir = view_dir(yaw, pitch);
+/// `[target.z + bottom, target.z + top]`, plus the distance to the target. `dir` is the view
+/// direction (`view_dir`).
+fn column_error(eye: Vector, dir: (f32, f32, f32), target: Vector, bottom: f32, top: f32) -> Option<(f32, f32)> {
     let dx = target.x - eye.x;
     let dy = target.y - eye.y;
     let horizontal = dx.hypot(dy);
@@ -200,7 +203,11 @@ fn column_error(eye: Vector, yaw: f32, pitch: f32, target: Vector, bottom: f32, 
 
 /// Position of a player at `tick`, linearly interpolated between records.
 fn position_at(positions: &VecDeque<PositionRecord>, tick: i64) -> Option<PositionRecord> {
-    let newer_idx = positions.iter().position(|r| r.tick as i64 >= tick)?;
+    // Records are strictly increasing in tick
+    let newer_idx = positions.partition_point(|r| (r.tick as i64) < tick);
+    if newer_idx == positions.len() {
+        return None;
+    }
     let newer = positions[newer_idx];
     if newer.tick as i64 == tick {
         return Some(newer);
@@ -224,6 +231,46 @@ fn position_at(positions: &VecDeque<PositionRecord>, tick: i64) -> Option<Positi
         team: newer.team,
         ducking: newer.ducking,
     })
+}
+
+/// Margin (degrees) of the `hitscan_error_exceeds` bound, far above the f32 rounding of the angles.
+const HITSCAN_BOUND_MARGIN: f32 = 0.05;
+
+/// Whether `model_error` of a hitscan sample is above `max_error` at every lag `0..=max_lag` (a
+/// performance shortcut, it never skips a lag that could pass). Hitscan errors are measured to a
+/// point of the body column at a position interpolated between records at most 6 ticks apart
+/// (`position_at`), so every such point lies in the bounding box of the records from
+/// `max_lag + 6` ticks before the sample on, extended by the column height. The view error to any
+/// point of the box's bounding sphere is at least the error to its centre minus its angular radius.
+fn hitscan_error_exceeds(sample: &Sample, positions: &VecDeque<PositionRecord>, max_lag: u32, max_error: f32) -> bool {
+    let first_tick = sample.tick as i64 - max_lag as i64 - 6;
+    let mut min = (f32::INFINITY, f32::INFINITY, f32::INFINITY);
+    let mut max = (f32::NEG_INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY);
+    let mut any = false;
+    for record in positions.iter().rev().take_while(|r| r.tick as i64 >= first_tick) {
+        let p = record.position;
+        if !(p.x.is_finite() && p.y.is_finite() && p.z.is_finite()) {
+            return false;
+        }
+        min = (min.0.min(p.x), min.1.min(p.y), min.2.min(p.z));
+        max = (max.0.max(p.x), max.1.max(p.y), max.2.max(p.z));
+        any = true;
+    }
+    let eye = sample.eye;
+    if !any || !(eye.x.is_finite() && eye.y.is_finite() && eye.z.is_finite()) {
+        return false;
+    }
+    // Body column: BODY_BOTTOM up to the standing (tallest) top
+    let (min_z, max_z) = (min.2 + BODY_BOTTOM, max.2 + BODY_TOP_STANDING);
+    let half = ((max.0 - min.0) * 0.5, (max.1 - min.1) * 0.5, (max_z - min_z) * 0.5);
+    let radius = (half.0 * half.0 + half.1 * half.1 + half.2 * half.2).sqrt();
+    let to_centre = (min.0 + half.0 - eye.x, min.1 + half.1 - eye.y, min_z + half.2 - eye.z);
+    let distance = (to_centre.0 * to_centre.0 + to_centre.1 * to_centre.1 + to_centre.2 * to_centre.2).sqrt();
+    if !(distance > radius + 1.0) {
+        return false;
+    }
+    let lower_bound = angle_between(sample.dir, to_centre) - (radius / distance).asin().to_degrees();
+    lower_bound > max_error + HITSCAN_BOUND_MARGIN
 }
 
 /// Error of the view against the flat ballistic arcs (projectile `speed`, gravity `g`) that hit the
@@ -262,7 +309,7 @@ fn model_error(sample: &Sample, target: &Target, lag: i32) -> Option<(f32, f32)>
             AimModel::Projectile { splash: true, .. } => SPLASH_BOTTOM,
             _ => BODY_BOTTOM,
         };
-        return column_error(sample.eye, sample.yaw, sample.pitch, rec.position, bottom, top);
+        return column_error(sample.eye, sample.dir, rec.position, bottom, top);
     }
     match sample.model {
         AimModel::Projectile { speed, gravity, splash, .. } => {
@@ -287,10 +334,10 @@ fn model_error(sample: &Sample, target: &Target, lag: i32) -> Option<(f32, f32)>
                 ballistic_error(sample, predicted, speed, gravity * WORLD_GRAVITY, top)
             } else {
                 let bottom = if splash { SPLASH_BOTTOM } else { BODY_BOTTOM };
-                column_error(sample.eye, sample.yaw, sample.pitch, predicted, bottom, top)
+                column_error(sample.eye, sample.dir, predicted, bottom, top)
             }
         }
-        _ => column_error(sample.eye, sample.yaw, sample.pitch, rec.position, BODY_BOTTOM, top),
+        _ => column_error(sample.eye, sample.dir, rec.position, BODY_BOTTOM, top),
     }
 }
 
@@ -692,9 +739,15 @@ impl PlainAimbot {
             }
             // Cheap pre-filter on the current position before trying every lag
             let Some(now) = target.positions.back() else { continue };
-            match column_error(cur.eye, cur.yaw, cur.pitch, now.position, SPLASH_BOTTOM, BODY_TOP_STANDING) {
+            match column_error(cur.eye, cur.dir, now.position, SPLASH_BOTTOM, BODY_TOP_STANDING) {
                 Some((e, _)) if e <= cfg.lock_prefilter => {}
                 _ => continue,
+            }
+            // Skips the lags only when none of them can be within the lock error (same result)
+            if cur.model == AimModel::Hitscan
+                && hitscan_error_exceeds(&cur, target.positions, cfg.max_lag, cfg.lock_max_error)
+            {
+                continue;
             }
             for lag in Self::lags(cfg, &cur.model) {
                 let Some((err, dist)) = model_error(&cur, target, lag) else { continue };
@@ -859,10 +912,14 @@ impl<'a> CheatAlgorithm<'a> for PlainAimbot {
                 }
             }
             let weapon = state.get_player_weapon(player);
-            let model = *self
-                .weapon_models
-                .entry(weapon.clone())
-                .or_insert_with(|| Self::aim_model(&weapon, cfg.projectile_model));
+            let (model, melee) = match self.weapon_models.get(&weapon) {
+                Some(&cached) => cached,
+                None => {
+                    let computed = (Self::aim_model(&weapon, cfg.projectile_model), Self::is_melee(&weapon));
+                    self.weapon_models.insert(weapon.clone(), computed);
+                    computed
+                }
+            };
             let since_spawn = self.jg.spawned(&sid, tick).min(self.jg.teleported(&sid, tick));
             if since_spawn < cfg.spawn_grace || player.is_taunting() || model == AimModel::Excluded {
                 pdata.samples.clear();
@@ -877,11 +934,12 @@ impl<'a> CheatAlgorithm<'a> for PlainAimbot {
                 sim_tick,
                 yaw: player.view_angle,
                 pitch: player.pitch_angle,
+                dir: view_dir(player.view_angle, player.pitch_angle),
                 eye: eye_position(player),
                 team: player.team as u8,
                 fired,
                 model,
-                melee: Self::is_melee(&weapon),
+                melee,
             });
             if pdata.samples.len() > SAMPLE_HISTORY {
                 pdata.samples.pop_front();

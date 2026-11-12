@@ -284,14 +284,18 @@ pub fn handle_to_entid(handle: u32) -> EntityId {
 
 // Compute the total angular difference between two angles
 pub fn angle_delta((ya1, pa1): (f32, f32), (ya2, pa2): (f32, f32)) -> f32 {
-    let vec1 = angles_to_unit_vec(ya1, pa1);
-    let vec2 = angles_to_unit_vec(ya2, pa2);
+    unit_vec_angle_delta(angles_to_unit_vec(ya1, pa1), angles_to_unit_vec(ya2, pa2))
+}
 
+/// `angle_delta` of two angles given as their `angles_to_unit_vec` vectors (bit-identical), so
+/// callers comparing the same angles many times can convert each angle once.
+pub fn unit_vec_angle_delta(vec1: (f32, f32, f32), vec2: (f32, f32, f32)) -> f32 {
     let dot = (vec1.0 * vec2.0 + vec1.1 * vec2.1 + vec1.2 * vec2.2).clamp(-1.0, 1.0);
     dot.acos().to_degrees()
 }
 
-fn angles_to_unit_vec(yaw: f32, pitch: f32) -> (f32, f32, f32) {
+/// Unit view vector of (yaw, pitch) in degrees, as used by `angle_delta`.
+pub fn angles_to_unit_vec(yaw: f32, pitch: f32) -> (f32, f32, f32) {
     let yaw = yaw.to_radians();
     let pitch = pitch.to_radians();
     (

@@ -75,19 +75,13 @@ impl AimingTracker {
         }
     }
 
-    /// Whether the charge released at `tick` may have lasted the overcharge time.
-    fn may_be_overcharged(&self, tick: u32) -> bool {
+    /// Charge length (ticks) of the aiming run released at `tick`: Some(None) when its start is
+    /// unknown, None when no such run was seen.
+    fn charge_ticks(&self, tick: u32) -> Option<Option<u32>> {
         let run = self.current.or(self
             .last
-            .filter(|run| tick.saturating_sub(run.end) <= BOW_RELEASE_SLACK_TICKS));
-        match run {
-            Some(AimingRun { start: None, .. }) => true,
-            Some(AimingRun { start: Some(start), end }) => {
-                end.max(tick).saturating_sub(start) >= BOW_OVERCHARGE_TICKS
-            }
-            // No aiming run seen at all: unknown, do not excuse.
-            None => false,
-        }
+            .filter(|run| tick.saturating_sub(run.end) <= BOW_RELEASE_SLACK_TICKS))?;
+        Some(run.start.map(|start| run.end.max(tick).saturating_sub(start)))
     }
 }
 
@@ -142,8 +136,8 @@ struct LaunchCandidate {
     launch_direction: Vector,
     owner_distance: f32,
     pipe_type: Option<i64>,
-    /// The bow was charged (TF_COND_AIMING) long enough to be overcharged.
-    bow_held_long: bool,
+    /// Length (ticks) of the TF_COND_AIMING run released with this launch, see `AimingTracker`.
+    charge_ticks: Option<Option<u32>>,
 }
 
 struct TentativeDetection {
@@ -409,10 +403,10 @@ impl CheatAlgorithm<'_> for Psilent5 {
                 launch_direction,
                 owner_distance,
                 pipe_type,
-                bow_held_long: self
+                charge_ticks: self
                     .aiming
                     .get(&owner_steam_id)
-                    .is_some_and(|tracker| tracker.may_be_overcharged(tick)),
+                    .and_then(|tracker| tracker.charge_ticks(tick)),
             });
         }
 
@@ -521,6 +515,14 @@ fn evaluate_candidate(
         }
     };
 
+    let is_downward_rocket =
+        candidate.launch_direction.z < -0.35 && candidate.projectile == "CTFProjectile_Rocket";
+    let effective_threshold = if is_downward_rocket {
+        angle_threshold + 1.5
+    } else {
+        angle_threshold
+    };
+
     let mut raw_delta = f32::INFINITY;
     let mut compensated_delta = f32::INFINITY;
     let mut best_view = (0.0, 0.0);
@@ -562,6 +564,11 @@ fn evaluate_candidate(
 
     // Continuous Yaw Compensation & Convergence Evaluation
     for (tick, pos, yaw, pitch) in test_views {
+        // `compensated_delta` only decreases: once below the threshold the launch is explained by
+        // the view and no detection can follow, so the remaining views can't change the result.
+        if compensated_delta < effective_threshold {
+            break;
+        }
         let view = (yaw, pitch);
         let current_raw = angle_delta(view, launch_angles);
         if current_raw < raw_delta {
@@ -579,32 +586,39 @@ fn evaluate_candidate(
             &[(false, 0.0)]
         };
 
+        // 1. Direct view angle alignment (infinite distance target: d -> infinity). It doesn't
+        // depend on the eye height, and the order of the checks within one view doesn't change
+        // the minimum or the view that reaches it first.
+        let mut expected_directs = [v_view; 2];
+        for (index, &(use_arc, arc_boost)) in arc_boost_candidates.iter().enumerate() {
+            let expected_direct = if use_arc {
+                let fwd_speed = (speed * speed - arc_boost * arc_boost).max(0.0).sqrt();
+                let v = Vector {
+                    x: v_view.x * fwd_speed + v_up.x * arc_boost,
+                    y: v_view.y * fwd_speed + v_up.y * arc_boost,
+                    z: v_view.z * fwd_speed + v_up.z * arc_boost,
+                };
+                normalized(v).unwrap_or(v_view)
+            } else {
+                v_view
+            };
+            expected_directs[index] = expected_direct;
+            let direct_delta = launch_delta(vector_angles(expected_direct));
+            if direct_delta < compensated_delta {
+                compensated_delta = direct_delta;
+                best_view = view;
+                best_tick = tick;
+            }
+        }
+
         for &eye_height in &EYE_HEIGHTS {
             let eye = Vector {
                 z: pos.z + eye_height,
                 ..pos
             };
 
-            for &(use_arc, arc_boost) in arc_boost_candidates {
-                // 1. Direct view angle alignment (infinite distance target: d -> infinity)
-                let expected_direct = if use_arc {
-                    let fwd_speed = (speed * speed - arc_boost * arc_boost).max(0.0).sqrt();
-                    let v = Vector {
-                        x: v_view.x * fwd_speed + v_up.x * arc_boost,
-                        y: v_view.y * fwd_speed + v_up.y * arc_boost,
-                        z: v_view.z * fwd_speed + v_up.z * arc_boost,
-                    };
-                    normalized(v).unwrap_or(v_view)
-                } else {
-                    v_view
-                };
-                let direct_angles = vector_angles(expected_direct);
-                let direct_delta = launch_delta(direct_angles);
-                if direct_delta < compensated_delta {
-                    compensated_delta = direct_delta;
-                    best_view = view;
-                    best_tick = tick;
-                }
+            for (index, &(use_arc, arc_boost)) in arc_boost_candidates.iter().enumerate() {
+                let expected_direct = expected_directs[index];
 
                 // 2. Analytical closest approach distance d* along sightline ray
                 let w = eye - candidate.origin;
@@ -705,14 +719,6 @@ fn evaluate_candidate(
         }
     }
 
-    let is_downward_rocket =
-        candidate.launch_direction.z < -0.35 && candidate.projectile == "CTFProjectile_Rocket";
-    let effective_threshold = if is_downward_rocket {
-        angle_threshold + 1.5
-    } else {
-        angle_threshold
-    };
-
     if !compensated_delta.is_finite() || compensated_delta < effective_threshold {
         return None;
     }
@@ -756,7 +762,7 @@ fn evaluate_candidate(
                 "pipe_type": candidate.pipe_type,
                 "samples": samples.len(),
                 "overcharge_spread": overcharge_spread,
-                "bow_held_long": candidate.bow_held_long,
+                "charge_ticks": candidate.charge_ticks.map(|ticks| ticks.map_or(json!("unknown"), |t| json!(t))),
             }),
         },
     })
@@ -881,7 +887,13 @@ fn may_be_overcharged_arrow(candidate: &LaunchCandidate, speed: f32) -> bool {
     candidate.projectile == "CTFProjectile_Arrow"
         && is_bow(&candidate.weapon_name)
         && speed >= BOW_FULL_CHARGE_SPEED - BOW_SPEED_TOLERANCE
-        && candidate.bow_held_long
+        && match candidate.charge_ticks {
+            // Start not seen: may have been held long enough.
+            Some(None) => true,
+            Some(Some(ticks)) => ticks >= BOW_OVERCHARGE_TICKS,
+            // No aiming run seen at all.
+            None => false,
+        }
 }
 
 /// Angular deviation left after allowing up to `spread` degrees of independent pitch and yaw

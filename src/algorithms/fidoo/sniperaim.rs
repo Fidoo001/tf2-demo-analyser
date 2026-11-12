@@ -130,16 +130,21 @@ const DOT_SHOWS_FIRED_RADII: f32 = 0.15;
 const DOT_SHOWS_FIRED_DEGREES: f32 = 0.02;
 /// Largest ticks from the shot to the update before / after it in a flick.
 const FLICK_MAX_GAP: i32 = 3;
-/// Rewinds tried for a head match on misses (whole ticks) and for confirmed headshots (quarter ticks).
+/// Rewinds tried for a head match on misses, whole ticks.
 const MISS_MAX_REWIND: i32 = 30;
-const REWIND_STEPS: usize = 180;
-const REWIND_STEPS_PER_TICK: f32 = 4.0;
-/// Rewinds around the typical one that count as the typical rewind, ticks.
-const TYPICAL_REWIND_WINDOW: [f32; 5] = [-2.0, -1.0, 0.0, 1.0, 2.0];
-/// A rewind explains a headshot when the fired ray passes this close to the head centre, HU.
+/// Rewinds tried for confirmed headshots, whole ticks. Lag compensation rewinds to a whole server tick
+/// (`cmd->tick_count - lerp ticks`), so fractional rewinds only matter between sparse records.
+const HEADSHOT_MAX_REWIND: usize = 30;
+/// Ticks around the typical rewind that count as the typical rewind.
+const TYPICAL_REWIND_WINDOW: usize = 2;
+/// A rewind explains a headshot when the hit point lies this close to the head centre, HU (3D, after
+/// moving the hit point `HIT_SURFACE_DEPTH` into the head).
 const HEAD_MATCH: f32 = 8.0;
-/// Lag offsets (rewind minus ping) tried for the typical rewind, quarter ticks.
-const LAG_OFFSET_STEPS: usize = 120;
+/// The blood hit point is the bullet's entry into the head hitbox; the centre lies about this far further
+/// along the ray, HU.
+const HIT_SURFACE_DEPTH: f32 = 3.0;
+/// Records over which the victim's speed at the shot is measured.
+const SPEED_RECORDS: usize = 5;
 
 #[derive(Clone, Copy, Debug)]
 struct Snap {
@@ -205,7 +210,7 @@ struct Flick {
     distance: f32,
 }
 
-/// A confirmed headshot with a hit point and how close the fired ray passes the head per rewind.
+/// A confirmed headshot on a moving victim with how far the exact hit point lies from the head per rewind.
 #[derive(Clone, Debug)]
 struct HeadshotRewind {
     player: u64,
@@ -214,7 +219,8 @@ struct HeadshotRewind {
     weapon: String,
     ping_ticks: f32,
     distance: f32,
-    /// Ray to head centre, HU, per quarter tick of rewind (INFINITY = no record)
+    /// Hit point (moved `HIT_SURFACE_DEPTH` into the head) to head centre, HU, per whole tick of rewind
+    /// (INFINITY = no record)
     errors: Vec<f32>,
 }
 
@@ -423,33 +429,35 @@ fn segment_distance(p: (f32, f32), a: (f32, f32), b: (f32, f32)) -> f32 {
     len2(sub2(p, (a.0 + ab.0 * t, a.1 + ab.1 * t)))
 }
 
-/// Lag offset (rewind minus ping, ticks) that lets the most of a player's headshots land.
-fn typical_lag_offset(shots: &[&HeadshotRewind]) -> f32 {
-    let mut best = (0, 0.0);
-    for step in 0..LAG_OFFSET_STEPS {
-        let offset = step as f32 / REWIND_STEPS_PER_TICK;
-        let landed = shots.iter().filter(|s| error_at(s, offset + s.ping_ticks).is_some_and(|e| e <= HEAD_MATCH)).count();
-        if landed > best.0 {
-            best = (landed, offset);
-        }
-    }
-    best.1
-}
-
-fn error_at(shot: &HeadshotRewind, rewind: f32) -> Option<f32> {
-    let step = (rewind * REWIND_STEPS_PER_TICK).round();
-    if step < 0.0 {
+/// Typical lag offset (rewind minus ping, ticks) of a player: the median over the headshots whose best
+/// rewind explains the hit, `None` with fewer than `min_headshots` of them.
+fn typical_lag_offset(shots: &[&HeadshotRewind], min_headshots: usize) -> Option<f32> {
+    let mut offsets: Vec<f32> = shots
+        .iter()
+        .filter_map(|s| best_rewind(s).filter(|&(_, e)| e <= HEAD_MATCH).map(|(r, _)| r - s.ping_ticks))
+        .collect();
+    if offsets.len() < min_headshots.max(1) {
         return None;
     }
-    shot.errors.get(step as usize).copied().filter(|e| e.is_finite())
+    offsets.sort_unstable_by(f32::total_cmp);
+    let n = offsets.len();
+    Some(if n % 2 == 1 { offsets[n / 2] } else { (offsets[n / 2 - 1] + offsets[n / 2]) / 2.0 })
 }
 
-/// Best rewind of a headshot and the ray to head distance there.
+/// Smallest error within `TYPICAL_REWIND_WINDOW` ticks of `rewind`.
+fn error_near(shot: &HeadshotRewind, rewind: f32) -> Option<f32> {
+    let centre = rewind.round().clamp(0.0, HEADSHOT_MAX_REWIND as f32) as usize;
+    let lo = centre.saturating_sub(TYPICAL_REWIND_WINDOW);
+    let hi = (centre + TYPICAL_REWIND_WINDOW).min(shot.errors.len().saturating_sub(1));
+    shot.errors.get(lo..=hi)?.iter().copied().filter(|e| e.is_finite()).reduce(f32::min)
+}
+
+/// Best rewind of a headshot (whole ticks) and the hit point to head distance there.
 fn best_rewind(shot: &HeadshotRewind) -> Option<(f32, f32)> {
     let mut best = None;
     for (i, &e) in shot.errors.iter().enumerate() {
         if e.is_finite() && best.is_none_or(|(_, b)| e < b) {
-            best = Some((i as f32 / REWIND_STEPS_PER_TICK, e));
+            best = Some((i as f32, e));
         }
     }
     best
@@ -547,14 +555,15 @@ impl SniperAim {
                 ("body_flick_min_ratio".to_string(), Parameter::Float(1.5)),
                 ("body_flick_min_rest_ticks".to_string(), Parameter::Int(3)),
                 ("check_backtrack".to_string(), Parameter::Bool(true)),
-                ("backtrack_min_head_error".to_string(), Parameter::Float(16.0)),
+                ("backtrack_min_hit_error".to_string(), Parameter::Float(16.0)),
                 ("backtrack_min_rewind_offset".to_string(), Parameter::Float(4.0)),
                 ("backtrack_min_headshots".to_string(), Parameter::Int(4)),
+                ("backtrack_min_victim_speed".to_string(), Parameter::Float(2.5)),
                 ("gated_min_detections".to_string(), Parameter::Int(3)),
                 ("flag_min_detections".to_string(), Parameter::Int(2)),
                 ("flag_window_ticks".to_string(), Parameter::Int(20000)),
                 ("silent_flick_weak_impulse".to_string(), Parameter::Float(1.0)),
-                ("backtrack_weak_min_head_error".to_string(), Parameter::Float(9.0)),
+                ("backtrack_weak_min_hit_error".to_string(), Parameter::Float(12.0)),
                 ("backtrack_weak_min_rewind_offset".to_string(), Parameter::Float(3.0)),
             ]),
             history: FxHashMap::default(),
@@ -943,7 +952,10 @@ impl SniperAim {
         })
     }
 
-    /// How the fired ray of a confirmed headshot passes the victim's head per rewind.
+    /// How far the exact hit point of a confirmed headshot lies from the victim's head per rewind. The
+    /// hit point is a 3D position on the rewound victim, so unlike the distance of the fired ray from the
+    /// head it also pins down the rewind while the victim moves along the ray. Only moving victims say
+    /// anything about the rewind.
     fn headshot_rewind(&self, shot: &Shot, sid: u64, hit_point: [f32; 3], victim_ent: u32, target: Option<u64>, weapon: &str, ping: u16) -> Option<HeadshotRewind> {
         let origin = shot.origin?;
         let dir = unit_towards(origin, hit_point)?;
@@ -951,13 +963,21 @@ impl SniperAim {
         let records = self.heads.get(&victim_ent)?;
         // The head model of ducked players is too coarse for this.
         let at_shot = records.partition_point(|r| r.sim <= now);
-        if at_shot == 0 || records[at_shot - 1].ducking {
+        if at_shot <= SPEED_RECORDS || records[at_shot - 1].ducking {
             return None;
         }
-        let errors = (0..REWIND_STEPS)
-            .map(|step| {
-                head_at(records, now as f32 - step as f32 / REWIND_STEPS_PER_TICK).map_or(f32::INFINITY, |head| ray_error(origin, dir, head))
-            })
+        let (a, b) = (&records[at_shot - 1 - SPEED_RECORDS], &records[at_shot - 1]);
+        let speed = (b.pos[0] - a.pos[0]).hypot(b.pos[1] - a.pos[1]) / (b.sim - a.sim).max(1) as f32;
+        if speed < get_parameter_value::<f32>(&self.params, "backtrack_min_victim_speed") {
+            return None;
+        }
+        let centre = [
+            hit_point[0] + dir[0] * HIT_SURFACE_DEPTH,
+            hit_point[1] + dir[1] * HIT_SURFACE_DEPTH,
+            hit_point[2] + dir[2] * HIT_SURFACE_DEPTH,
+        ];
+        let errors = (0..=HEADSHOT_MAX_REWIND)
+            .map(|r| head_at(records, (now - r as i64) as f32).map_or(f32::INFINITY, |head| dist(centre, head)))
             .collect();
         Some(HeadshotRewind {
             player: sid,
@@ -1436,9 +1456,9 @@ impl<'a> CheatAlgorithm<'a> for SniperAim {
             return Ok(vec![]);
         }
         let check_backtrack: bool = get_parameter_value(&self.params, "check_backtrack");
-        let min_error: f32 = get_parameter_value(&self.params, "backtrack_min_head_error");
+        let min_error: f32 = get_parameter_value(&self.params, "backtrack_min_hit_error");
         let min_offset: f32 = get_parameter_value(&self.params, "backtrack_min_rewind_offset");
-        let weak_error: f32 = get_parameter_value(&self.params, "backtrack_weak_min_head_error");
+        let weak_error: f32 = get_parameter_value(&self.params, "backtrack_weak_min_hit_error");
         let weak_offset: f32 = get_parameter_value(&self.params, "backtrack_weak_min_rewind_offset");
         let min_headshots = get_parameter_value::<i32>(&self.params, "backtrack_min_headshots").max(1) as usize;
         let gated_min = get_parameter_value::<i32>(&self.params, "gated_min_detections").max(1) as usize;
@@ -1452,10 +1472,7 @@ impl<'a> CheatAlgorithm<'a> for SniperAim {
         let round2 = |v: f32| (v * 100.0).round() / 100.0;
         for player in players.iter().copied().filter(|_| check_backtrack) {
             let shots: Vec<&HeadshotRewind> = self.rewinds.iter().filter(|r| r.player == player).collect();
-            if shots.len() < min_headshots {
-                continue;
-            }
-            let lag_offset = typical_lag_offset(&shots);
+            let Some(lag_offset) = typical_lag_offset(&shots, min_headshots) else { continue };
             for shot in &shots {
                 if self.reported.contains(&(player, shot.tick)) {
                     continue;
@@ -1465,7 +1482,7 @@ impl<'a> CheatAlgorithm<'a> for SniperAim {
                     continue;
                 }
                 let typical = lag_offset + shot.ping_ticks;
-                let typical_error = TYPICAL_REWIND_WINDOW.iter().filter_map(|d| error_at(shot, typical + d)).fold(f32::INFINITY, f32::min);
+                let typical_error = error_near(shot, typical).unwrap_or(f32::INFINITY);
                 let offset = (rewind - typical).abs();
                 if !typical_error.is_finite() || typical_error < weak_error || offset < weak_offset {
                     continue;
@@ -1483,8 +1500,8 @@ impl<'a> CheatAlgorithm<'a> for SniperAim {
                         "target": shot.target,
                         "rewind_ticks": round2(rewind),
                         "typical_rewind_ticks": round2(typical),
-                        "head_error": round2(error),
-                        "head_error_at_typical_rewind": round2(typical_error),
+                        "hit_error": round2(error),
+                        "hit_error_at_typical_rewind": round2(typical_error),
                         "distance": shot.distance.round(),
                     }),
                 };
@@ -1804,12 +1821,16 @@ mod tests {
             weapon: String::new(),
             ping_ticks: 2.0,
             distance: 1000.0,
-            errors: (0..REWIND_STEPS).map(|s| if s == k * 4 { 1.0 } else { 40.0 }).collect(),
+            errors: (0..=HEADSHOT_MAX_REWIND).map(|s| if s == k { 1.0 } else { 40.0 }).collect(),
         };
         let shots = [shot(12), shot(12), shot(12), shot(25)];
         let refs: Vec<&HeadshotRewind> = shots.iter().collect();
-        assert!((typical_lag_offset(&refs) - 10.0).abs() < 0.01);
+        // median of 10, 10, 10, 23
+        assert!((typical_lag_offset(&refs, 4).unwrap() - 10.0).abs() < 0.01);
+        assert!(typical_lag_offset(&refs, 5).is_none());
         assert_eq!(best_rewind(&shots[3]), Some((25.0, 1.0)));
+        assert_eq!(error_near(&shots[3], 12.0), Some(40.0));
+        assert_eq!(error_near(&shots[3], 23.0), Some(1.0));
     }
 
     #[test]

@@ -989,11 +989,24 @@ fn binom_score(x: u32, n: u32, p: f64) -> f64 {
     if x == 0 || n == 0 {
         return 0.0;
     }
-    let ln_pmf = |i: u32| {
-        let lc: f64 = (0..i).map(|j| f64::from(n - j).ln() - f64::from(j + 1).ln()).sum();
-        lc + f64::from(i) * p.ln() + f64::from(n - i) * (1.0 - p).ln()
-    };
-    let terms: Vec<f64> = (x..=n).map(ln_pmf).collect();
+    // ln C(n, i) is the sum of the first i terms. It is accumulated once, term by term in the
+    // same order a fresh `.sum()` over `0..i` adds them (bit-identical), instead of being
+    // recomputed for every i, which was quadratic in the player's sample count.
+    let term = |j: u32| f64::from(n - j).ln() - f64::from(j + 1).ln();
+    let mut terms: Vec<f64> = Vec::new();
+    if x <= n {
+        let mut lc: f64 = std::iter::empty::<f64>().sum();
+        for j in 0..x {
+            lc += term(j);
+        }
+        terms.reserve((n - x + 1) as usize);
+        for i in x..=n {
+            terms.push(lc + f64::from(i) * p.ln() + f64::from(n - i) * (1.0 - p).ln());
+            if i < n {
+                lc += term(i);
+            }
+        }
+    }
     let m = terms.iter().cloned().fold(f64::MIN, f64::max);
     let ln_tail = m + terms.iter().map(|t| (t - m).exp()).sum::<f64>().ln();
     (-ln_tail / std::f64::consts::LN_10).clamp(0.0, 50.0)
@@ -1370,6 +1383,33 @@ impl<'a> CheatAlgorithm<'a> for MlAutoStrafe {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The original quadratic `binom_score`, kept to check the linear one gives identical bits.
+    fn binom_score_reference(x: u32, n: u32, p: f64) -> f64 {
+        if x == 0 || n == 0 {
+            return 0.0;
+        }
+        let ln_pmf = |i: u32| {
+            let lc: f64 = (0..i).map(|j| f64::from(n - j).ln() - f64::from(j + 1).ln()).sum();
+            lc + f64::from(i) * p.ln() + f64::from(n - i) * (1.0 - p).ln()
+        };
+        let terms: Vec<f64> = (x..=n).map(ln_pmf).collect();
+        let m = terms.iter().cloned().fold(f64::MIN, f64::max);
+        let ln_tail = m + terms.iter().map(|t| (t - m).exp()).sum::<f64>().ln();
+        (-ln_tail / std::f64::consts::LN_10).clamp(0.0, 50.0)
+    }
+
+    #[test]
+    fn test_binom_score_matches_reference() {
+        for &p in &[0.01, 0.05, 0.2, 0.5, 0.9] {
+            for n in (0..400).step_by(7).chain([1, 2, 3, 1000, 2500]) {
+                for x in (0..=n + 2).step_by(((n / 25) as usize).max(1)) {
+                    let (fast, slow) = (binom_score(x, n, p), binom_score_reference(x, n, p));
+                    assert_eq!(fast.to_bits(), slow.to_bits(), "x={x} n={n} p={p}: {fast} vs {slow}");
+                }
+            }
+        }
+    }
 
     #[test]
     fn test_feature_counts() {

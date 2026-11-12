@@ -1,6 +1,6 @@
 // Written by Nocrex
 
-use std::collections::HashMap;
+use crate::util::helpers::FxHashMap;
 
 use crate::base::cheat_analyser_base::{CheatAnalyserState, PlayerState};
 use steamid_ng::SteamID;
@@ -20,9 +20,10 @@ struct PlayerData {
 
 #[derive(Default)]
 pub struct JankGuard {
-    player_data: HashMap<u64, PlayerData>,
+    // Fx hashed (SteamID keys); nothing depends on the iteration order
+    player_data: FxHashMap<u64, PlayerData>,
     // Positions seen this tick, kept between ticks to reuse the allocation.
-    positions: HashMap<u64, Vector>,
+    positions: FxHashMap<u64, Vector>,
 }
 
 impl JankGuard {

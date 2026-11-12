@@ -7,7 +7,10 @@
 //! miss) the crosshair's path over the 100 ticks before the shot is measured against the target's head at
 //! the sniper's lag compensation offset (distance, acquisition, speed into the shot) and its shape over
 //! the scoped stretch leading into the shot (head crossings, direction reversals, smoothness, hovering,
-//! holding height, snaps). The shots of a sniper are aggregated over the demo into player features and
+//! holding height, snaps). A backtrack triggerbot fires when the crosshair touches any recent head record:
+//! a headshot whose exact hit point (`CTETFBlood`) only fits another rewind than the sniper's typical one is
+//! measured against that record instead (`backtrack_shift`, `ShotRecord::refine_backtrack_k`).
+//! The shots of a sniper are aggregated over the demo into player features and
 //! scored by a logistic regression (`assets/ml_triggerbot_model.json`) trained on the confirmed triggerbot
 //! cheaters of the reference demos and reference-like reported snipers no aimbot algorithm flags, against
 //! unreported and aimbot-flagged snipers. Snipers at or above `min_score` are reported at their highest
@@ -45,8 +48,13 @@ const MAX_K: i32 = 19;
 /// Offset used when a sniper has too few hits to estimate it (100 ms interp + ~50 ms ping)
 const DEFAULT_K: i32 = 10;
 const MIN_HITS_FOR_K: usize = 4;
+/// Largest per-shot shift of the lag offset by backtrack alignment (Amalgam's window is up to 200 ms)
+const MAX_BT_SHIFT: i32 = 15;
+/// Ticks around the hit point's rewind searched for a backtracked headshot's lag offset (see
+/// `ShotRecord::refine_backtrack_k`)
+const BT_REFINE: i32 = 4;
 /// Ticks of target positions kept per shot
-const TRACK_WINDOW: u32 = AIM_WINDOW as u32 + MAX_K as u32 + 2;
+const TRACK_WINDOW: u32 = AIM_WINDOW as u32 + (MAX_K + MAX_BT_SHIFT + BT_REFINE) as u32 + 2;
 const HISTORY_TICKS: usize = 160;
 /// Shots are skipped while the shooter or the shot's target (re)entered PVS fewer than this many ticks ago:
 /// positions, angles and the dot are unreliable right after a player starts being transmitted again
@@ -83,22 +91,69 @@ const MAX_READY_LATENCY: f32 = 66.0;
 const NEAR_MISS_RADIUS: f32 = 4.0;
 const TF_COND_ZOOMED: u32 = 1 << 1;
 
+// Backtrack alignment of headshots (docs/ml_triggerbot.md §2): the blood hit point pins down which victim
+// record the server rewound to (method and constants of `fidoo/sniperaim`'s backtrack_headshot).
+/// Rewinds tried, whole ticks (lag compensation rewinds to a whole server tick)
+const HEADSHOT_MAX_REWIND: usize = 30;
+/// A rewind explains a headshot when the hit point (moved `HIT_SURFACE_DEPTH` into the head) lies this
+/// close to the head centre, HU
+const HEAD_MATCH: f32 = 8.0;
+const HIT_SURFACE_DEPTH: f32 = 3.0;
+/// Ticks around the typical rewind that count as the typical rewind
+const TYPICAL_REWIND_WINDOW: usize = 2;
+/// A headshot is realigned when its best rewind fits within `BT_MAX_FIT_ERROR` HU, the typical rewind is at
+/// least `BT_MIN_ERROR_GAIN` HU worse and the two are at least `BT_MIN_OFFSET` ticks apart. Legit snipers:
+/// 2.0% of moving headshots (same as `HEAD_MATCH` / 12 HU; the looser fit keeps 1.4x the backtracked shots
+/// of the backtrack references, whose fits are often 8-10 HU off with the head model)
+const BT_MAX_FIT_ERROR: f32 = 10.0;
+const BT_MIN_ERROR_GAIN: f32 = 8.0;
+const BT_MIN_OFFSET: f32 = 3.0;
+/// Headshots fitting the typical rewind needed to know it
+const BT_MIN_HEADSHOTS: usize = 4;
+/// Only moving victims (HU per tick over `SPEED_RECORDS` records) say anything about the rewind
+const BT_MIN_VICTIM_SPEED: f32 = 2.5;
+const SPEED_RECORDS: usize = 5;
+/// Simulation records kept per player, and the largest record gap interpolated over (ticks)
+const HEAD_RECORDS: usize = 90;
+const MAX_RECORD_GAP: f32 = 8.0;
+/// Head centre relative to the origin (copy of `fidoo/sniperaim`'s fit on 7000 server-confirmed
+/// headshots): forward, forward per pitch / 90, left, up, up per pitch / 90, forward per forward speed /
+/// 300 HU/s, left per left speed / 300 HU/s. Index: class, then standing / ducked.
+const HEAD_MODEL: [[[f32; 7]; 2]; 9] = [
+    [[10.1, -2.2, 0.6, 65.9, -5.8, 2.4, 3.2], [6.5, 18.9, 1.4, 56.7, -10.5, 4.6, -0.2]], // Scout
+    [[9.5, -0.7, -0.7, 70.4, -7.4, 2.8, 0.6], [8.9, 8.9, -2.7, 66.3, 11.4, -2.2, 3.8]],  // Soldier
+    [[8.7, 12.2, -2.4, 67.0, -7.8, 1.6, -0.1], [14.4, 19.3, -5.9, 57.5, 3.0, -14.6, -3.6]], // Pyro
+    [[8.9, 7.8, -2.5, 70.7, -8.5, -2.0, 2.1], [12.7, -5.5, -4.9, 63.7, 13.2, 5.1, 3.5]], // Demoman
+    [[3.6, 3.4, 1.6, 74.4, -2.6, 0.4, 4.4], [-0.9, -2.4, -1.2, 67.1, 16.7, 0.6, 0.3]],   // Heavy
+    [[9.2, 12.1, -3.1, 65.6, -7.4, 0.0, 1.7], [11.7, 2.4, -2.5, 54.1, -7.3, -8.8, 12.1]], // Engineer
+    [[4.9, -3.7, -1.0, 74.2, -4.1, 1.5, 2.2], [7.0, 0.0, -2.0, 60.0, 0.0, 0.0, 0.0]],    // Medic
+    [[2.1, -4.2, -1.6, 74.3, -4.3, 6.0, 2.2], [3.0, -11.0, -3.9, 72.0, -3.4, 5.7, 9.8]], // Sniper
+    [[7.4, 5.2, 0.1, 72.8, -3.3, 0.2, 2.7], [10.1, 2.8, -1.2, 68.1, 6.5, -6.0, 5.6]],    // Spy
+];
+const TF_DMG_CUSTOM_HEADSHOT: u16 = 1;
+const TF_DMG_CUSTOM_HEADSHOT_DECAPITATION: u16 = 51;
+
 const DOT_ORIGIN: SendPropIdentifier = SendPropIdentifier::new("DT_BaseEntity", "m_vecOrigin");
 const DOT_OWNER: SendPropIdentifier = SendPropIdentifier::new("DT_BaseEntity", "m_hOwnerEntity");
 const BULLETS_PLAYER: SendPropIdentifier = SendPropIdentifier::new("DT_TEFireBullets", "m_iPlayer");
 const BULLETS_WEAPON: SendPropIdentifier = SendPropIdentifier::new("DT_TEFireBullets", "m_iWeaponID");
+const BULLETS_ORIGIN: SendPropIdentifier = SendPropIdentifier::new("DT_TEFireBullets", "m_vecOrigin");
+const BLOOD_X: SendPropIdentifier = SendPropIdentifier::new("DT_TETFBlood", "m_vecOrigin[0]");
+const BLOOD_Y: SendPropIdentifier = SendPropIdentifier::new("DT_TETFBlood", "m_vecOrigin[1]");
+const BLOOD_Z: SendPropIdentifier = SendPropIdentifier::new("DT_TETFBlood", "m_vecOrigin[2]");
+const BLOOD_ENT: SendPropIdentifier = SendPropIdentifier::new("DT_TETFBlood", "entindex");
 
 static MODEL: OnceLock<Option<Model>> = OnceLock::new();
 
 /// Per-shot features, in the order of `SHOT_FEATURES`. Distances are in head radii, `a*` are distances
 /// from the final aim point (relative to the target, so head model errors cancel), speeds per tick.
-pub const SHOT_FEATURES: [&str; 59] = [
+pub const SHOT_FEATURES: [&str; 60] = [
     "d0", "d1", "d2", "d4", "d8", "a1", "a2", "a4", "a8", "acq1", "acq2", "acq4", "v0", "v1", "v2", "decel",
     "ang_speed0", "approach_cos", "min_d_pre", "dwell_frac", "tgt_speed", "k_dev", "since_prev", "zoom_delay",
     "ready_latency", "ready_hold", "tgt_dir_cos", "n_near", "shooter_speed", "scope_len", "near_frac", "path_near",
     "cross", "reversals", "turn_mean", "max_step", "med_step", "smooth", "speed_cv", "y_std_near", "x_std_near",
     "v_shot", "moving_shot", "slide", "lat_shot", "near_time", "revisit", "revisit_ready", "pass_close", "entry",
-    "on_before", "d_prev", "slow_slide", "hit", "headshot", "dist", "lag", "cover", "gap0",
+    "on_before", "d_prev", "slow_slide", "hit", "headshot", "dist", "lag", "cover", "gap0", "bt_offset",
 ];
 /// Path features (`scope_len` .. `slow_slide`), see `ShotRecord::path_features`
 const PATH_FEATURES: usize = 24;
@@ -134,6 +189,9 @@ const IDX_HIT: usize = 53;
 const IDX_HEADSHOT: usize = 54;
 const IDX_DIST: usize = 55;
 const IDX_LAG: usize = 56;
+/// Shift of the shot's lag offset by backtrack alignment (ticks, positive = older record), 0 when the
+/// typical rewind explains the headshot, NaN when the rewind is unknown (no headshot hit point, still victim)
+const IDX_BT_OFFSET: usize = 59;
 /// Player features, see `unit_features`
 pub const UNIT_FEATURES: [&str; 29] = [
     "zig_share", "snap_share", "moving_share", "long_share", "hover_share", "slide_share", "reversals_mean",
@@ -180,6 +238,128 @@ struct Shot {
     weapon_id: i64,
     /// Previous rifle shot of the same shooter
     prev_tick: Option<u32>,
+    /// Shoot position sent with the bullet (the shooter's own origin can be stale)
+    origin: Option<[f32; 3]>,
+}
+
+/// One simulation step of a player, like the server's lag compensation records
+#[derive(Clone, Copy, Debug)]
+struct HeadRecord {
+    sim: i64,
+    tick: u32,
+    pos: [f32; 3],
+    yaw: f32,
+    pitch: f32,
+    ducking: bool,
+    class: Class,
+}
+
+/// Distance of a headshot's hit point from the victim's head at every whole-tick rewind (HU, infinite where
+/// the victim has no record)
+#[derive(Clone, Debug)]
+struct RewindFit {
+    errors: Vec<f32>,
+    ping_ticks: f32,
+}
+
+impl RewindFit {
+    /// Best rewind (ticks) and its error
+    fn best(&self) -> Option<(f32, f32)> {
+        let mut best: Option<(f32, f32)> = None;
+        for (i, &e) in self.errors.iter().enumerate() {
+            if e.is_finite() && best.is_none_or(|(_, b)| e < b) {
+                best = Some((i as f32, e));
+            }
+        }
+        best
+    }
+
+    /// Smallest error within `TYPICAL_REWIND_WINDOW` ticks of `rewind`
+    fn error_near(&self, rewind: f32) -> Option<f32> {
+        let centre = rewind.round().clamp(0.0, HEADSHOT_MAX_REWIND as f32) as usize;
+        let lo = centre.saturating_sub(TYPICAL_REWIND_WINDOW);
+        let hi = (centre + TYPICAL_REWIND_WINDOW).min(self.errors.len().saturating_sub(1));
+        self.errors.get(lo..=hi)?.iter().copied().filter(|e| e.is_finite()).reduce(f32::min)
+    }
+}
+
+/// Typical lag offset (rewind minus ping, ticks) of a sniper: the median over the headshots whose best
+/// rewind fits the head
+fn typical_lag_offset(fits: &[&RewindFit]) -> Option<f32> {
+    let mut offsets: Vec<f32> =
+        fits.iter().filter_map(|f| f.best().filter(|&(_, e)| e <= HEAD_MATCH).map(|(r, _)| r - f.ping_ticks)).collect();
+    if offsets.len() < BT_MIN_HEADSHOTS {
+        return None;
+    }
+    offsets.sort_unstable_by(f32::total_cmp);
+    let n = offsets.len();
+    Some(if n % 2 == 1 { offsets[n / 2] } else { (offsets[n / 2 - 1] + offsets[n / 2]) / 2.0 })
+}
+
+/// Lag offset shift of a headshot (ticks, positive = older record) when its typical rewind can't explain the
+/// hit point and another rewind does, `Some(0)` when the typical rewind explains it, `None` when unknown
+fn backtrack_shift(fit: &RewindFit, lag_offset: f32) -> Option<i32> {
+    let (rewind, error) = fit.best()?;
+    let typical = lag_offset + fit.ping_ticks;
+    let typical_error = fit.error_near(typical)?;
+    if error > BT_MAX_FIT_ERROR && typical_error > HEAD_MATCH {
+        return None; // no rewind fits: the head model doesn't say anything
+    }
+    let offset = rewind - typical;
+    if error <= BT_MAX_FIT_ERROR && typical_error >= error + BT_MIN_ERROR_GAIN && offset.abs() >= BT_MIN_OFFSET {
+        return Some((offset.round() as i32).clamp(-MAX_BT_SHIFT, MAX_BT_SHIFT));
+    }
+    Some(0)
+}
+
+fn head_model(class: Class, ducking: bool) -> Option<&'static [f32; 7]> {
+    let i = match class {
+        Class::Scout => 0,
+        Class::Soldier => 1,
+        Class::Pyro => 2,
+        Class::Demoman => 3,
+        Class::Heavy => 4,
+        Class::Engineer => 5,
+        Class::Medic => 6,
+        Class::Sniper => 7,
+        Class::Spy => 8,
+        _ => return None,
+    };
+    Some(&HEAD_MODEL[i][usize::from(ducking)])
+}
+
+/// Head centre of record `i`, its velocity taken from the records two steps away
+fn head_of(records: &VecDeque<HeadRecord>, i: usize) -> Option<[f32; 3]> {
+    let r = records.get(i)?;
+    let m = head_model(r.class, r.ducking)?;
+    let (a, b) = (&records[i.saturating_sub(2)], &records[(i + 2).min(records.len() - 1)]);
+    let dt = (b.sim - a.sim).max(1) as f32;
+    let v = [(b.pos[0] - a.pos[0]) / dt, (b.pos[1] - a.pos[1]) / dt];
+    let (sin, cos) = r.yaw.to_radians().sin_cos();
+    let (f, l) = ([cos, sin], [-sin, cos]);
+    let p = r.pitch / 90.0;
+    let vf = (v[0] * f[0] + v[1] * f[1]) / 4.5;
+    let vl = (v[0] * l[0] + v[1] * l[1]) / 4.5;
+    let forward = m[0] + m[1] * p + m[5] * vf;
+    let left = m[2] + m[6] * vl;
+    Some([r.pos[0] + f[0] * forward + l[0] * left, r.pos[1] + f[1] * forward + l[1] * left, r.pos[2] + m[3] + m[4] * p])
+}
+
+/// Head centre at a simulation tick, interpolated between records like lag compensation
+fn head_at_sim(records: &VecDeque<HeadRecord>, sim: i64) -> Option<[f32; 3]> {
+    let i = records.partition_point(|r| r.sim < sim);
+    let b = records.get(i)?;
+    if b.sim == sim {
+        return head_of(records, i);
+    }
+    let a = records.get(i.checked_sub(1)?)?;
+    let gap = (b.sim - a.sim) as f32;
+    if gap > MAX_RECORD_GAP {
+        return None;
+    }
+    let t = (sim - a.sim) as f32 / gap;
+    let (ha, hb) = (head_of(records, i - 1)?, head_of(records, i)?);
+    Some([ha[0] + (hb[0] - ha[0]) * t, ha[1] + (hb[1] - ha[1]) * t, ha[2] + (hb[2] - ha[2]) * t])
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -259,6 +439,8 @@ struct ShotRecord {
     /// Exact aim from the sniper dot, ordered by tick offset
     aim: Vec<AimSample>,
     targets: Vec<TargetTrack>,
+    /// Rewind fit of a headshot on a moving, standing victim with a blood hit point
+    rewind: Option<RewindFit>,
 }
 
 impl ShotRecord {
@@ -289,6 +471,19 @@ impl ShotRecord {
             .map(|(_, t)| t)
     }
 
+    /// Lag offset of a backtracked headshot in this algorithm's frame: the offset within `BT_REFINE` ticks of
+    /// `centre` (the sniper's offset shifted by the hit point's rewind difference) where the crosshair is
+    /// closest to the victim's head. The hit point's rewind (sniper dot frame, fitted head model) and this
+    /// frame (head above the origin, per demo tick) agree only to a few ticks.
+    fn refine_backtrack_k(&self, centre: i32) -> Option<i32> {
+        let t = self.targets.get(self.victim?)?;
+        (centre - BT_REFINE..=centre + BT_REFINE)
+            .filter(|kk| (0..=MAX_K + MAX_BT_SHIFT + BT_REFINE).contains(kk))
+            .filter_map(|kk| Some((self.rel(0, t, kk)?.len(), kk)))
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .map(|(_, kk)| kk)
+    }
+
     /// First tick from which the rifle could fire a headshot
     fn ready_offset(&self) -> Option<i64> {
         let refire = self.prev_tick.map_or(i64::MIN, |p| i64::from(p) + REFIRE_TICKS - i64::from(self.tick));
@@ -300,10 +495,11 @@ impl ShotRecord {
         Some(refire.max(unlock))
     }
 
-    /// Shot features at the sniper's lag offset `k`, `None` without aim or target at the shot.
+    /// Shot features at lag offset `k` (the sniper's, shifted by `bt_offset` for a backtracked headshot),
+    /// `None` without aim or target at the shot.
     /// Dot samples are often only every second tick (and missing out of PVS), so the features walk the
     /// available samples instead of fixed tick offsets.
-    fn features(&self, k: i32) -> Option<[f32; SHOT_FEATURES.len()]> {
+    fn features(&self, k: i32, bt_offset: f32) -> Option<[f32; SHOT_FEATURES.len()]> {
         let t = self.target(k)?;
         let r0 = self.rel(0, t, k)?;
         let nan = f32::NAN;
@@ -428,9 +624,10 @@ impl ShotRecord {
             ready_latency, ready_hold, tgt_dir_cos, n_near as f32, self.shooter_speed,
         ]);
         out[IDX_PATH..AGGREGATED].copy_from_slice(&path);
-        out[AGGREGATED..].copy_from_slice(&[
+        out[AGGREGATED..IDX_BT_OFFSET].copy_from_slice(&[
             f32::from(u8::from(self.hit)), f32::from(u8::from(self.headshot)), r0.dist, k as f32, cover, gap0,
         ]);
+        out[IDX_BT_OFFSET] = bt_offset;
         Some(out)
     }
 
@@ -885,6 +1082,12 @@ pub struct MlTriggerbot {
     first_tick: u32,
     /// Rifle shots per shooter entity on a skipped map (the warning needs a sniper worth checking)
     skipped_shots: FxHashMap<u32, usize>,
+    /// Simulation records per player entity (lag compensation history for the rewind fits)
+    heads: FxHashMap<u32, VecDeque<HeadRecord>>,
+    /// Newest simulation tick of any player per demo tick
+    server_ticks: VecDeque<(u32, i64)>,
+    /// `CTETFBlood` hit points: (tick, victim entity, position)
+    bloods: VecDeque<(u32, u32, [f32; 3])>,
 }
 
 impl Default for MlTriggerbot {
@@ -898,7 +1101,7 @@ impl MlTriggerbot {
         Self {
             params: Parameters::from([
                 ("enabled".to_string(), Parameter::Bool(false)),
-                ("min_score".to_string(), Parameter::Float(0.26)),
+                ("min_score".to_string(), Parameter::Float(0.255)),
                 ("min_shots".to_string(), Parameter::Int(8)),
                 ("max_detections".to_string(), Parameter::Int(3)),
                 ("skip_nonstandard_maps".to_string(), Parameter::Bool(true)),
@@ -916,6 +1119,9 @@ impl MlTriggerbot {
             map: String::new(),
             first_tick: 0,
             skipped_shots: FxHashMap::default(),
+            heads: FxHashMap::default(),
+            server_ticks: VecDeque::new(),
+            bloods: VecDeque::new(),
         }
     }
 
@@ -1019,6 +1225,12 @@ impl MlTriggerbot {
         }
         let shooter_speed = snap_at(shooter_hist, shot.tick.saturating_sub(1))
             .map_or(f32::NAN, |p| dist(p.pos, s0.pos));
+        let headshot_custom =
+            hurt.is_some_and(|h| matches!(h.custom, TF_DMG_CUSTOM_HEADSHOT | TF_DMG_CUSTOM_HEADSHOT_DECAPITATION));
+        let rewind = match victim_ent {
+            Some(ent) if headshot_custom && victim.is_some() => self.rewind_fit(&shot, ent, shooter.ping),
+            _ => None,
+        };
 
         self.shooters.entry(sid).or_default().shots.push(ShotRecord {
             tick: shot.tick,
@@ -1035,7 +1247,37 @@ impl MlTriggerbot {
             shooter_speed,
             aim,
             targets,
+            rewind,
         });
+    }
+
+    /// How far the exact hit point of a headshot lies from the victim's head per whole-tick rewind. The hit
+    /// point is a 3D position on the victim as the server rewound it, so it pins down the record even when
+    /// the victim moves along the ray. Ducked or slow victims say nothing about the rewind.
+    fn rewind_fit(&self, shot: &Shot, victim_ent: u32, ping: u16) -> Option<RewindFit> {
+        let origin = shot.origin?;
+        let hit = self.bloods.iter().find(|(t, e, _)| *e == victim_ent && *t >= shot.tick && *t <= shot.tick + 1)?.2;
+        let d = [hit[0] - origin[0], hit[1] - origin[1], hit[2] - origin[2]];
+        let n = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+        if n <= 0.0 {
+            return None;
+        }
+        let now = self.server_ticks.iter().find(|(t, _)| *t == shot.tick)?.1;
+        let records = self.heads.get(&victim_ent)?;
+        let at_shot = records.partition_point(|r| r.sim <= now);
+        if at_shot <= SPEED_RECORDS || records[at_shot - 1].ducking {
+            return None;
+        }
+        let (a, b) = (&records[at_shot - 1 - SPEED_RECORDS], &records[at_shot - 1]);
+        let speed = (b.pos[0] - a.pos[0]).hypot(b.pos[1] - a.pos[1]) / (b.sim - a.sim).max(1) as f32;
+        if speed < BT_MIN_VICTIM_SPEED {
+            return None;
+        }
+        let centre = [0, 1, 2].map(|i| hit[i] + d[i] / n * HIT_SURFACE_DEPTH);
+        let errors = (0..=HEADSHOT_MAX_REWIND as i64)
+            .map(|r| head_at_sim(records, now - r).map_or(f32::INFINITY, |h| dist(centre, h)))
+            .collect();
+        Some(RewindFit { errors, ping_ticks: f32::from(ping) / 15.0 })
     }
 }
 
@@ -1083,6 +1325,19 @@ impl<'a> CheatAlgorithm<'a> for MlTriggerbot {
             Message::TempEntities(msg) => {
                 for event in &msg.events {
                     let class = &parser_state.server_classes[usize::from(event.class_id)].name;
+                    if class.as_str() == "CTETFBlood" {
+                        if self.map_ok == Some(false) {
+                            continue;
+                        }
+                        let coord = |id: SendPropIdentifier| {
+                            event.props.iter().find(|p| p.identifier == id).and_then(|p| f32::try_from(&p.value).ok())
+                        };
+                        let ent = event.props.iter().find(|p| p.identifier == BLOOD_ENT).and_then(|p| i64::try_from(&p.value).ok());
+                        if let (Some(x), Some(y), Some(z), Some(ent)) = (coord(BLOOD_X), coord(BLOOD_Y), coord(BLOOD_Z), ent) {
+                            self.bloods.push_back((ticknum, ent as u32, [x, y, z]));
+                        }
+                        continue;
+                    }
                     if class.as_str() != "CTEFireBullets" {
                         continue;
                     }
@@ -1096,7 +1351,13 @@ impl<'a> CheatAlgorithm<'a> for MlTriggerbot {
                             continue;
                         }
                         let prev_tick = self.last_shot.insert(ent, ticknum).filter(|&t| t < ticknum);
-                        self.pending.push(Shot { tick: ticknum, ent, weapon_id, prev_tick });
+                        let origin = event
+                            .props
+                            .iter()
+                            .find(|p| p.identifier == BULLETS_ORIGIN)
+                            .and_then(|p| Vector::try_from(&p.value).ok())
+                            .map(|v| [v.x, v.y, v.z]);
+                        self.pending.push(Shot { tick: ticknum, ent, weapon_id, prev_tick, origin });
                     }
                 }
             }
@@ -1198,6 +1459,46 @@ impl<'a> CheatAlgorithm<'a> for MlTriggerbot {
                 hist.pop_front();
             }
         }
+        let mut newest_sim = None;
+        for p in &state.players {
+            if p.state != PlayerState::Alive || !p.in_pvs {
+                continue;
+            }
+            let sim = state.sim_tick(p);
+            newest_sim = newest_sim.max(Some(sim));
+            let records = self.heads.entry(u32::from(p.entity)).or_default();
+            if records.back().is_some_and(|r| r.sim > sim || r.tick > ticknum) {
+                records.clear();
+            }
+            if records.back().is_none_or(|r| r.sim < sim) {
+                records.push_back(HeadRecord {
+                    sim,
+                    tick: ticknum,
+                    pos: [p.position.x, p.position.y, p.position.z],
+                    yaw: p.view_angle,
+                    pitch: p.pitch_angle,
+                    ducking: p.is_ducking(),
+                    class: p.class,
+                });
+                if records.len() > HEAD_RECORDS {
+                    records.pop_front();
+                }
+            }
+        }
+        if let Some(sim) = newest_sim {
+            if self.server_ticks.back().is_some_and(|(t, _)| *t > ticknum) {
+                self.server_ticks.clear();
+            }
+            if self.server_ticks.back().is_none_or(|(t, _)| *t < ticknum) {
+                self.server_ticks.push_back((ticknum, sim));
+            }
+            while self.server_ticks.len() > HISTORY_TICKS {
+                self.server_ticks.pop_front();
+            }
+        }
+        while self.bloods.front().is_some_and(|b| b.0 + 2 * POST_TICKS < ticknum) {
+            self.bloods.pop_front();
+        }
         for dot in self.dots.values() {
             let hist = self.dot_history.entry(dot.owner).or_default();
             if hist.back().is_some_and(|(t, _)| *t > ticknum) {
@@ -1254,14 +1555,25 @@ impl<'a> CheatAlgorithm<'a> for MlTriggerbot {
         for sid in sids {
             let data = &self.shooters[&sid];
             let hits: Vec<&ShotRecord> = data.shots.iter().filter(|s| s.hit && s.victim.is_some()).collect();
-            let k = estimate_k(&hits);
+            let k_sniper = estimate_k(&hits);
+            // backtrack alignment: a triggerbot with backtrack fires when the crosshair touches any recent
+            // head record, so a headshot whose hit point only fits another rewind is measured against the
+            // head track of that record (the sniper's lag offset shifted by the rewind difference)
+            let fits: Vec<&RewindFit> = data.shots.iter().filter_map(|s| s.rewind.as_ref()).collect();
+            let lag_offset = typical_lag_offset(&fits);
             let first = self.shots.len();
             for s in &data.shots {
+                let shift = lag_offset.and_then(|o| backtrack_shift(s.rewind.as_ref()?, o));
+                let k = match shift {
+                    Some(sh) if sh != 0 => s.refine_backtrack_k(k_sniper + sh).unwrap_or(k_sniper),
+                    _ => k_sniper,
+                };
+                let shift = shift.map(|sh| if sh == 0 { 0 } else { k - k_sniper });
                 // the target (victim, or the closest head of a miss) only just came into PVS
                 if s.target(k).is_some_and(|t| t.pvs_age < MIN_PVS_TICKS) {
                     continue;
                 }
-                let Some(features) = s.features(k) else { continue };
+                let Some(features) = s.features(k, shift.map_or(f32::NAN, |x| x as f32)) else { continue };
                 let score = model.map_or(f32::NAN, |m| m.shot.probability(&features));
                 let victim = s.target(k).map_or(0, |t| t.sid);
                 let path = s.target(k).map_or_else(Vec::new, |t| {
@@ -1313,6 +1625,7 @@ impl<'a> CheatAlgorithm<'a> for MlTriggerbot {
                         "ready_hold_ticks": opt(f[IDX_READY_HOLD]),
                         "zoom_delay_ticks": opt(f[IDX_ZOOM_DELAY]),
                         "lag_ticks": f[IDX_LAG],
+                        "backtrack_ticks": opt(f[IDX_BT_OFFSET]).filter(|&v| v != 0.0),
                     }),
                 });
             }
@@ -1348,12 +1661,13 @@ mod tests {
             shooter_speed: 0.0,
             aim,
             targets: vec![TargetTrack { sid: 1, pvs_age: 1000, head: (-70..=0).map(|j| (j, head)).collect() }],
+            rewind: None,
         }
     }
 
     #[test]
     fn instant_shot_has_short_ready_hold() {
-        let f = sweep_shot(0).features(DEFAULT_K).unwrap();
+        let f = sweep_shot(0).features(DEFAULT_K, f32::NAN).unwrap();
         assert!(f[IDX_D0] < 1e-3);
         assert_eq!(f[IDX_ACQ2], 4.0);
         // within 1 radius of the aim point only on the tick before
@@ -1363,14 +1677,14 @@ mod tests {
 
     #[test]
     fn held_shot_counts_ready_hold() {
-        let f = sweep_shot(-10).features(DEFAULT_K).unwrap();
+        let f = sweep_shot(-10).features(DEFAULT_K, f32::NAN).unwrap();
         assert_eq!(f[IDX_ACQ2], 14.0);
         // on the aim point from -10 (and within 1 radius at -11)
         assert_eq!(f[IDX_READY_HOLD], 11.0);
         let mut s = sweep_shot(-10);
         // rifle ready only 3 ticks before the shot
         s.prev_tick = Some(1000 - 103);
-        let f = s.features(DEFAULT_K).unwrap();
+        let f = s.features(DEFAULT_K, f32::NAN).unwrap();
         assert_eq!(f[IDX_READY_HOLD], 3.0);
         assert_eq!(f[IDX_READY_LATENCY], 3.0);
     }
@@ -1385,8 +1699,47 @@ mod tests {
     #[test]
     fn unit_features_match_names() {
         let s = sweep_shot(0);
-        let f = s.features(DEFAULT_K).unwrap();
+        let f = s.features(DEFAULT_K, f32::NAN).unwrap();
         let row = ShotFeatures { tick: 0, shooter: 0, victim: 1, weapon: String::new(), features: f, score: 0.0, path: vec![] };
         assert_eq!(unit_features(&[&row]).len(), unit_feature_names().len());
+    }
+
+    /// Hit point error curve with its minimum `min` at rewind `at`, rising 4 HU per tick
+    fn fit(at: usize, min: f32) -> RewindFit {
+        RewindFit { errors: (0..=HEADSHOT_MAX_REWIND).map(|r| min + 4.0 * (r as f32 - at as f32).abs()).collect(), ping_ticks: 3.0 }
+    }
+
+    #[test]
+    fn backtrack_shift_needs_a_failing_typical_rewind() {
+        let typical_lag = 12.0; // typical rewind 15 with 3 ticks of ping
+        assert_eq!(backtrack_shift(&fit(15, 2.0), typical_lag), Some(0));
+        // 7 ticks older: 28 HU off at the typical rewind
+        assert_eq!(backtrack_shift(&fit(22, 2.0), typical_lag), Some(7));
+        assert_eq!(backtrack_shift(&fit(9, 2.0), typical_lag), Some(-6));
+        // 3 ticks off, but only 4 HU worse at the typical window (+-2 ticks): not realigned
+        assert_eq!(backtrack_shift(&fit(18, 2.0), typical_lag), Some(0));
+        // no rewind fits the head
+        assert_eq!(backtrack_shift(&fit(22, 9.0), typical_lag), Some(7));
+        assert_eq!(backtrack_shift(&fit(22, 11.0), typical_lag), None);
+        assert_eq!(backtrack_shift(&RewindFit { errors: vec![20.0; 31], ping_ticks: 3.0 }, typical_lag), None);
+        let fits = [fit(15, 1.0), fit(16, 1.0), fit(14, 1.0), fit(22, 1.0)];
+        assert_eq!(typical_lag_offset(&fits.iter().collect::<Vec<_>>()), Some(12.5));
+    }
+
+    #[test]
+    fn shifted_lag_offset_measures_the_backtracked_head() {
+        // the head moves 2 HU per tick; the crosshair sits on where it was 18 ticks ago (k 10 + 8)
+        let eye = [0.0, 0.0, 75.0];
+        let mut s = sweep_shot(0);
+        s.targets[0].head = (-140..=0).map(|j| (j, [1000.0, 2.0 * j as f32, 75.0])).collect();
+        let (yaw, pitch) = dir_angles(eye, [1000.0, -36.0, 75.0]);
+        s.aim = (-AIM_WINDOW..=0).map(|j| AimSample { j, eye, yaw, pitch }).collect();
+        assert!(s.features(DEFAULT_K, 0.0).unwrap()[IDX_D0] > 2.5);
+        let f = s.features(DEFAULT_K + 8, 8.0).unwrap();
+        assert!(f[IDX_D0] < 1e-3);
+        assert_eq!(f[IDX_BT_OFFSET], 8.0);
+        // the hit point's estimate (k + 6) is refined to the closest offset within BT_REFINE ticks
+        assert_eq!(s.refine_backtrack_k(DEFAULT_K + 6), Some(DEFAULT_K + 8));
+        assert_eq!(s.refine_backtrack_k(DEFAULT_K + 1), Some(DEFAULT_K + 5));
     }
 }

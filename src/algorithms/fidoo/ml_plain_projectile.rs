@@ -8,7 +8,7 @@
 //! computes kinematic and ballistic lead features for each event, aggregates them per player over the demo,
 //! and scores players with an embedded LightGBM model (`assets/ml_plain_projectile_model.json`).
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::OnceLock;
 
 use anyhow::Error;
@@ -621,9 +621,12 @@ impl MlPlainProjectile {
                 None => continue,
             };
 
-            // Find best target
+            // Find best target. Exact angle ties are common (players stay in `players` at their last
+            // position, and two players can share one), so they are broken by the fresher position
+            // record, then the lower SteamID, not by the random hash map order.
             let mut best_target = None;
             let mut best_angle = 45.0f32;
+            let mut best_tie_key = (0u32, 0u64);
 
             for (&target_sid, target_hist) in &self.players {
                 if target_sid == pending.attacker {
@@ -647,9 +650,14 @@ impl MlPlainProjectile {
                     continue;
                 }
                 let ang = angle_between(view_dir(s0.yaw, s0.pitch), (dx, dy, dz));
-                if ang < best_angle {
+                let tie_key = (p.tick, target_sid);
+                let wins_tie = best_target.is_some()
+                    && ang == best_angle
+                    && (tie_key.0 > best_tie_key.0 || (tie_key.0 == best_tie_key.0 && tie_key.1 < best_tie_key.1));
+                if ang < best_angle || wins_tie {
                     best_angle = ang;
                     best_target = Some(target_sid);
+                    best_tie_key = tie_key;
                 }
             }
 
@@ -865,8 +873,8 @@ impl<'a> CheatAlgorithm<'a> for MlPlainProjectile {
         let min_events: i32 = get_parameter_value(&self.params, "min_events");
         let max_detections: i32 = get_parameter_value(&self.params, "max_detections");
 
-        // Group events by attacker
-        let mut by_player: HashMap<u64, Vec<usize>> = HashMap::new();
+        // Group events by attacker (ordered, so `units` come out in the same order on every run)
+        let mut by_player: BTreeMap<u64, Vec<usize>> = BTreeMap::new();
         for (idx, ev) in self.events.iter().enumerate() {
             by_player.entry(ev.attacker).or_default().push(idx);
         }

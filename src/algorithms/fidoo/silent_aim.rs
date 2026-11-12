@@ -9,7 +9,7 @@ use tf_demo_parser::ParserState;
 use crate::base::cheat_analyser_base::{CheatAnalyserState, PlayerState};
 use crate::lib::algorithm::{CheatAlgorithm, Detection};
 use crate::lib::parameters::{get_parameter_value, Parameter, Parameters};
-use crate::util::helpers::angle_delta;
+use crate::util::helpers::{angles_to_unit_vec, unit_vec_angle_delta, FxHashMap};
 use crate::util::nocrex::jankguard::JankGuard;
 
 const TELEPORT_DIST_SQ: f32 = 256.0 * 256.0;
@@ -25,6 +25,9 @@ struct PlayerSnapshot {
     position: Vector,
     view_angle: f32,
     pitch_angle: f32,
+    /// `angles_to_unit_vec(view_angle, pitch_angle)`, so `angle_delta`s between snapshots don't
+    /// convert the same angles again (`unit_vec_angle_delta` gives the same bits)
+    unit: (f32, f32, f32),
 }
 
 #[derive(Default)]
@@ -47,12 +50,13 @@ enum WeaponCategory {
 
 #[derive(Default)]
 pub struct SilentAim {
-    player_states: HashMap<u64, PlayerHistoryState>,
+    player_states: FxHashMap<u64, PlayerHistoryState>,
     jg: JankGuard,
     params: Parameters,
     detections: Vec<Detection>,
-    // classify_weapon results by weapon name (it is called for every player on every tick)
-    weapon_categories: HashMap<String, WeaponCategory>,
+    // classify_weapon and is_rocket_launcher results by weapon name (needed for every player on
+    // every tick)
+    weapon_categories: FxHashMap<String, (WeaponCategory, bool)>,
 }
 
 impl SilentAim {
@@ -284,13 +288,13 @@ impl SilentAim {
     fn excursion_shape(
         history: &VecDeque<PlayerSnapshot>,
         i: usize,
-        current_angle: (f32, f32),
-        anchor_angle: (f32, f32),
+        current_unit: (f32, f32, f32),
+        anchor_unit: (f32, f32, f32),
     ) -> (usize, u32) {
         let peak = (1..i)
             .map(|m| {
-                let a = (history[m].view_angle, history[m].pitch_angle);
-                angle_delta(current_angle, a).max(angle_delta(anchor_angle, a))
+                let a = history[m].unit;
+                unit_vec_angle_delta(current_unit, a).max(unit_vec_angle_delta(anchor_unit, a))
             })
             .fold(0.0f32, f32::max);
 
@@ -300,7 +304,9 @@ impl SilentAim {
             let snap = &history[m];
             let a = (snap.view_angle, snap.pitch_angle);
             // Frames still near either endpoint are not part of the excursion
-            if angle_delta(current_angle, a).min(angle_delta(anchor_angle, a)) < EXCURSION_PEAK_FRACTION * peak {
+            if unit_vec_angle_delta(current_unit, snap.unit).min(unit_vec_angle_delta(anchor_unit, snap.unit))
+                < EXCURSION_PEAK_FRACTION * peak
+            {
                 continue;
             }
             if !angles.contains(&a) {
@@ -314,28 +320,32 @@ impl SilentAim {
 
     /// Specifically identifies downward rocket jumps (Soldier + Rocket Launcher + downward pitch floor > 20°).
     /// Prevents false exclusions for Scout/Sniper/Spy high-ground combat.
+    #[cfg(test)]
     fn is_rocket_jump_context(
         class_name: &str,
         weapon_name: &str,
         curr_pitch: f32,
         anchor_pitch: f32,
     ) -> bool {
-        if class_name == "soldier" {
-            let lw = weapon_name.to_lowercase();
-            if lw.contains("rocket")
-                || lw.contains("direct hit")
-                || lw.contains("black box")
-                || lw.contains("air strike")
-                || lw.contains("liberty launcher")
-                || lw.contains("beggar")
-            {
-                // Rocket jumping flick specifically aims at the feet/floor/ramp/wall (> 20.0°)
-                if curr_pitch > 20.0 && anchor_pitch > 20.0 {
-                    return true;
-                }
-            }
-        }
-        false
+        class_name == "soldier"
+            && Self::rocket_jump_pitches(Self::is_rocket_launcher(weapon_name), curr_pitch, anchor_pitch)
+    }
+
+    /// Rocket launchers of `is_rocket_jump_context`, by weapon name.
+    fn is_rocket_launcher(weapon_name: &str) -> bool {
+        let lw = weapon_name.to_lowercase();
+        lw.contains("rocket")
+            || lw.contains("direct hit")
+            || lw.contains("black box")
+            || lw.contains("air strike")
+            || lw.contains("liberty launcher")
+            || lw.contains("beggar")
+    }
+
+    /// `is_rocket_jump_context` for a soldier, with the launcher check already done.
+    fn rocket_jump_pitches(rocket_launcher: bool, curr_pitch: f32, anchor_pitch: f32) -> bool {
+        // Rocket jumping flick specifically aims at the feet/floor/ramp/wall (> 20.0°)
+        rocket_launcher && curr_pitch > 20.0 && anchor_pitch > 20.0
     }
 }
 
@@ -484,6 +494,7 @@ impl<'a> CheatAlgorithm<'a> for SilentAim {
                 position: player.position,
                 view_angle: player.view_angle,
                 pitch_angle: player.pitch_angle,
+                unit: angles_to_unit_vec(player.view_angle, player.pitch_angle),
             };
 
             pstate.history.push_front(snapshot);
@@ -501,12 +512,12 @@ impl<'a> CheatAlgorithm<'a> for SilentAim {
 
             // Classify weapon
             let weapon_name = state.get_player_weapon(player);
-            let weapon_category = match self.weapon_categories.get(weapon_name.as_str()) {
-                Some(category) => *category,
+            let (weapon_category, rocket_launcher) = match self.weapon_categories.get(weapon_name.as_str()) {
+                Some(cached) => *cached,
                 None => {
-                    let category = Self::classify_weapon(&weapon_name);
-                    self.weapon_categories.insert(weapon_name.clone(), category);
-                    category
+                    let cached = (Self::classify_weapon(&weapon_name), Self::is_rocket_launcher(&weapon_name));
+                    self.weapon_categories.insert(weapon_name.clone(), cached);
+                    cached
                 }
             };
 
@@ -570,12 +581,14 @@ impl<'a> CheatAlgorithm<'a> for SilentAim {
                 }
 
                 // Specifically filter downward rocket jumping (Soldier + Rocket Launcher + pitch > 65°)
-                if Self::is_rocket_jump_context(class_name, &weapon_name, curr_snap.pitch_angle, anchor_snap.pitch_angle) {
+                if class_name == "soldier"
+                    && Self::rocket_jump_pitches(rocket_launcher, curr_snap.pitch_angle, anchor_snap.pitch_angle)
+                {
                     continue;
                 }
 
                 // Return delta between current angle (t) and anchor angle (t - i)
-                let delta_0_i = angle_delta(current_angle, anchor_angle);
+                let delta_0_i = unit_vec_angle_delta(curr_snap.unit, anchor_snap.unit);
 
                 // Check exact angle match (zero drift or within float quantization epsilon)
                 let is_exact = delta_0_i <= exact_match_epsilon
@@ -599,7 +612,7 @@ impl<'a> CheatAlgorithm<'a> for SilentAim {
                 };
 
                 let (excursion_angles, excursion_hold) =
-                    Self::excursion_shape(&pstate.history, i, current_angle, anchor_angle);
+                    Self::excursion_shape(&pstate.history, i, curr_snap.unit, anchor_snap.unit);
                 if excursion_angles > max_excursion_angles || excursion_hold > max_excursion_hold_ticks {
                     continue;
                 }
@@ -622,8 +635,8 @@ impl<'a> CheatAlgorithm<'a> for SilentAim {
                         continue;
                     }
 
-                    let mid_delta_curr = angle_delta(current_angle, mid_angle);
-                    let mid_delta_anchor = angle_delta(anchor_angle, mid_angle);
+                    let mid_delta_curr = unit_vec_angle_delta(curr_snap.unit, mid_snap.unit);
+                    let mid_delta_anchor = unit_vec_angle_delta(anchor_snap.unit, mid_snap.unit);
                     let peak_delta = mid_delta_curr.max(mid_delta_anchor);
 
                     if peak_delta < min_peak_delta {

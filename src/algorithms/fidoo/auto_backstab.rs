@@ -8,14 +8,14 @@ use tf_demo_parser::demo::gameevent_gen::GameEvent;
 use tf_demo_parser::demo::message::packetentities::{EntityId, UpdateType};
 use tf_demo_parser::demo::message::Message;
 use tf_demo_parser::demo::parser::analyser::Class;
-use tf_demo_parser::demo::sendprop::SendPropIdentifier;
+use tf_demo_parser::demo::sendprop::{SendProp, SendPropIdentifier};
 use tf_demo_parser::demo::vector::Vector;
 use tf_demo_parser::{MessageType, ParserState};
 
 use crate::base::cheat_analyser_base::{CheatAnalyserState, Player, PlayerState};
 use crate::lib::algorithm::{CheatAlgorithm, Detection};
 use crate::lib::parameters::{get_parameter_value, Parameter, Parameters};
-use crate::util::helpers::{angle_delta, handle_to_entid};
+use crate::util::helpers::{angle_delta, handle_to_entid, FxHashMap};
 use crate::util::nocrex::jankguard::JankGuard;
 
 const ATTACK_HISTORY_MAX_TICKS: u32 = 40;
@@ -121,6 +121,28 @@ pub struct AutoBackstab {
     pending_stabs: Vec<PendingStab>,
     logged_detections: HashSet<(u64, u32)>,
     detections: Vec<Detection>,
+    /// Which knife prop an identifier is, by prop name (computed once per identifier)
+    prop_kinds: FxHashMap<SendPropIdentifier, KnifeProp>,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum KnifeProp {
+    Ready,
+    Owner,
+    Other,
+}
+
+impl KnifeProp {
+    fn of(identifier: SendPropIdentifier) -> Self {
+        match identifier.names() {
+            Some((_, prop_name)) => match prop_name.as_str() {
+                "m_bReadyToBackstab" => KnifeProp::Ready,
+                "m_hOwnerEntity" | "m_hOwner" => KnifeProp::Owner,
+                _ => KnifeProp::Other,
+            },
+            None => KnifeProp::Other,
+        }
+    }
 }
 
 impl Default for AutoBackstab {
@@ -229,6 +251,7 @@ impl AutoBackstab {
             pending_stabs: Vec::new(),
             logged_detections: HashSet::new(),
             detections: Vec::new(),
+            prop_kinds: FxHashMap::default(),
         }
     }
 
@@ -754,25 +777,36 @@ impl<'a> CheatAlgorithm<'a> for AutoBackstab {
                     let mut ready_prop = None;
                     let mut owner_prop = None;
 
-                    for prop in entity.props(parser_state) {
-                        if let Some((_, prop_name)) = prop.identifier.names() {
-                            match prop_name.as_str() {
-                                "m_bReadyToBackstab" => {
-                                    if let Ok(val) = i64::try_from(&prop.value) {
-                                        ready_prop = Some(val != 0);
-                                    }
+                    // Entering entities are merged with their baseline; other updates are exactly
+                    // their own props, which are read in place instead of cloned.
+                    let merged: Vec<SendProp>;
+                    let props: &[SendProp] = if entity.update_type == UpdateType::Enter {
+                        merged = entity.props(parser_state).collect();
+                        &merged
+                    } else {
+                        &entity.props
+                    };
+                    for prop in props {
+                        let kind = *self
+                            .prop_kinds
+                            .entry(prop.identifier)
+                            .or_insert_with(|| KnifeProp::of(prop.identifier));
+                        match kind {
+                            KnifeProp::Ready => {
+                                if let Ok(val) = i64::try_from(&prop.value) {
+                                    ready_prop = Some(val != 0);
                                 }
-                                "m_hOwnerEntity" | "m_hOwner" => {
-                                    if let Ok(val) = i64::try_from(&prop.value) {
-                                        let handle = val as u32;
-                                        let ent_id = handle_to_entid(handle);
-                                        if u32::from(ent_id) != 0x7FF && u32::from(ent_id) != 0 {
-                                            owner_prop = Some(ent_id);
-                                        }
-                                    }
-                                }
-                                _ => {}
                             }
+                            KnifeProp::Owner => {
+                                if let Ok(val) = i64::try_from(&prop.value) {
+                                    let handle = val as u32;
+                                    let ent_id = handle_to_entid(handle);
+                                    if u32::from(ent_id) != 0x7FF && u32::from(ent_id) != 0 {
+                                        owner_prop = Some(ent_id);
+                                    }
+                                }
+                            }
+                            KnifeProp::Other => {}
                         }
                     }
 
