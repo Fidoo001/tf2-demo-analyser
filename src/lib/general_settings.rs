@@ -254,7 +254,7 @@ impl Default for ColorSettings {
             text_color: [0xB4, 0xB4, 0xB4],
             background_color: [0x1B, 0x1B, 0x1B],
             selected_color: [0x00, 0x5C, 0x80],
-            normal_player_color: [0xB4, 0xB4, 0xB4],
+            normal_player_color: [0x4C, 0xE0, 0x3C],
             marked_player_color: [0xEB, 0x46, 0x46],
             deleted_player_color: [0x6E, 0x6E, 0x6E],
         }
