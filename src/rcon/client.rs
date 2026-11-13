@@ -12,6 +12,8 @@ use std::net::{SocketAddr, TcpStream};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use crate::debug_log;
+
 pub const SERVERDATA_AUTH: i32 = 3;
 pub const SERVERDATA_AUTH_RESPONSE: i32 = 2;
 pub const SERVERDATA_EXECCOMMAND: i32 = 2;
@@ -126,6 +128,15 @@ fn read_packet(stream: &mut TcpStream) -> std::io::Result<Option<(i32, i32, Stri
     Ok(Some((id, packet_type, body)))
 }
 
+/// The command as written to the debug log: a password set through RCON is hidden.
+fn redact_command(command: &str) -> String {
+    if command.trim_start().to_ascii_lowercase().starts_with("rcon_password") {
+        "rcon_password ***".to_string()
+    } else {
+        command.to_string()
+    }
+}
+
 /// Id of the next command, so its reply can be told apart from late replies to earlier ones.
 fn next_command_id() -> i32 {
     static NEXT_ID: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(100);
@@ -169,10 +180,20 @@ impl RconClient {
             }
         };
 
+        debug_log!(
+            "[RCON] Connecting to {addr} (password {} characters, timeout {} ms)",
+            self.config.password.chars().count(),
+            self.config.timeout.as_millis()
+        );
         let stream_res = TcpStream::connect_timeout(&addr, self.config.timeout);
         let mut stream = match stream_res {
             Ok(s) => s,
             Err(e) => {
+                debug_log!(
+                    "[RCON] TCP connect to {addr} failed: {e} (kind {:?}, os error {:?}). Refused usually means TF2 is not running or was started without -usercon / with another port.",
+                    e.kind(),
+                    e.raw_os_error()
+                );
                 let err = format!("Could not connect to TF2 on {addr}: {e}");
                 self.state = RconConnectionState::Error(err.clone());
                 return Err(err);
@@ -181,9 +202,11 @@ impl RconClient {
 
         let _ = stream.set_read_timeout(Some(self.config.timeout));
         let _ = stream.set_write_timeout(Some(self.config.timeout));
+        debug_log!("[RCON] TCP connected (local {:?}), sending auth", stream.local_addr());
 
         // Send authentication packet (id = 1, type = 3)
         if let Err(e) = send_packet(&mut stream, 1, SERVERDATA_AUTH, &self.config.password) {
+            debug_log!("[RCON] Sending auth failed: {e} (kind {:?}, os error {:?})", e.kind(), e.raw_os_error());
             let err = if e.kind() == std::io::ErrorKind::ConnectionReset || e.raw_os_error() == Some(10054) {
                 "Connection reset by TF2 (os error 10054). If multiple failed connection attempts occurred, TF2 may have temporarily banned 127.0.0.1 (restart TF2 to clear).".to_string()
             } else {
@@ -202,11 +225,13 @@ impl RconClient {
                 // TF2 may be busy for a moment (e.g. loading a map)
                 Ok(None) if auth_started.elapsed() < COMMAND_REPLY_WAIT => continue,
                 Ok(None) => {
+                    debug_log!("[RCON] No auth response within {} ms", auth_started.elapsed().as_millis());
                     let err = "Timed out waiting for the RCON auth response".to_string();
                     self.state = RconConnectionState::Error(err.clone());
                     return Err(err);
                 }
-                Ok(Some((id, packet_type, _))) => {
+                Ok(Some((id, packet_type, body))) => {
+                    debug_log!("[RCON] Auth reply packet: id={id} type={packet_type} body={body:?}");
                     if packet_type == SERVERDATA_AUTH_RESPONSE {
                         if id == -1 {
                             let err = "RCON authentication failed: invalid password".to_string();
@@ -219,6 +244,7 @@ impl RconClient {
                     }
                 }
                 Err(e) => {
+                    debug_log!("[RCON] Reading auth response failed: {e} (kind {:?}, os error {:?})", e.kind(), e.raw_os_error());
                     let err = if e.kind() == std::io::ErrorKind::ConnectionReset || e.raw_os_error() == Some(10054) {
                         "Connection reset by TF2 (os error 10054). If multiple failed connection attempts occurred, TF2 may have temporarily banned 127.0.0.1 (restart TF2 to clear). Also verify 'rcon_password' is set in TF2 console.".to_string()
                     } else {
@@ -236,6 +262,7 @@ impl RconClient {
             return Err(err);
         }
 
+        debug_log!("[RCON] Authenticated in {} ms", auth_started.elapsed().as_millis());
         self.stream = Some(Arc::new(Mutex::new(stream)));
         self.state = RconConnectionState::Connected;
         Ok(())
@@ -264,6 +291,7 @@ impl RconClient {
         match Self::send_command_shared(&stream_arc, command) {
             Ok(body) => Ok(body),
             Err(e) => {
+                debug_log!("[RCON] Command {:?} failed, disconnecting: {e}", redact_command(command));
                 self.disconnect();
                 self.state = RconConnectionState::Error(e.clone());
                 Err(e)
@@ -293,14 +321,34 @@ impl RconClient {
         // packets (long outputs such as `status`); they are skipped so they cannot pile up in the
         // socket or be taken for this command's reply.
         let started = std::time::Instant::now();
+        let mut skipped = 0usize;
         loop {
             match read_packet(&mut stream) {
-                Ok(Some((reply_id, _, body))) if reply_id == id => return Ok(body),
-                Ok(Some(_)) if started.elapsed() < COMMAND_REPLY_WAIT => {}
+                Ok(Some((reply_id, _, body))) if reply_id == id => {
+                    debug_log!(
+                        "[RCON] > {:?}: reply after {} ms, {} bytes{}",
+                        redact_command(trimmed),
+                        started.elapsed().as_millis(),
+                        body.len(),
+                        if skipped > 0 { format!(" ({skipped} stale packets skipped)") } else { String::new() }
+                    );
+                    return Ok(body);
+                }
+                Ok(Some(_)) if started.elapsed() < COMMAND_REPLY_WAIT => skipped += 1,
                 // No reply (yet): the command was still delivered to TF2 (e.g. playdemo or
                 // demo_gototick have no console output)
-                Ok(_) => return Ok(String::new()),
-                Err(e) => return Err(format!("Connection lost: {e}")),
+                Ok(_) => {
+                    debug_log!(
+                        "[RCON] > {:?}: no reply within {} ms ({skipped} stale packets skipped)",
+                        redact_command(trimmed),
+                        started.elapsed().as_millis()
+                    );
+                    return Ok(String::new());
+                }
+                Err(e) => {
+                    debug_log!("[RCON] > {:?}: connection lost: {e} (kind {:?}, os error {:?})", redact_command(trimmed), e.kind(), e.raw_os_error());
+                    return Err(format!("Connection lost: {e}"));
+                }
             }
         }
     }

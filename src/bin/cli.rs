@@ -187,6 +187,8 @@ pub struct SteamAccountChecker {
     /// `unknown_retry_after` passed, since `get_status` is called once per detection.
     failed_at: HashMap<u64, std::time::Instant>,
     unknown_retry_after: std::time::Duration,
+    /// Steam Web API key (`general_settings.steam_api_key`); empty = community XML lookups only.
+    api_key: String,
 }
 
 impl SteamAccountChecker {
@@ -198,6 +200,51 @@ impl SteamAccountChecker {
             request_interval: std::time::Duration::from_millis(300),
             failed_at: HashMap::new(),
             unknown_retry_after: std::time::Duration::from_secs(300),
+            api_key: String::new(),
+        }
+    }
+
+    /// Uses the Steam Web API key from `general_settings.steam_api_key` in the config, if set.
+    pub fn with_config(config: &Option<HashMap<String, Parameters>>) -> Self {
+        let mut checker = Self::new();
+        if let Some(Parameter::String(key)) = config
+            .as_ref()
+            .and_then(|c| c.get("general_settings"))
+            .and_then(|g| g.get("steam_api_key"))
+        {
+            checker.api_key = key.trim().to_string();
+        }
+        checker
+    }
+
+    /// With an API key, resolves the existing accounts among `ids` with batched Web API requests
+    /// (not rate limited like the community pages). Accounts the API did not return are left for
+    /// `get_status`, whose XML lookup tells a deleted account apart.
+    pub fn prefetch(&mut self, ids: &HashSet<u64>) {
+        use analysis_template::util::helpers::{request_existing_steam_accounts, SteamApiError, STEAM_SUMMARIES_BATCH};
+        if self.api_key.is_empty() {
+            return;
+        }
+        let pending: Vec<u64> = ids
+            .iter()
+            .copied()
+            .filter(|&id| id != 0 && !matches!(self.cache.get(&id), Some(AccountStatus::Exists | AccountStatus::Deleted)))
+            .collect();
+        for chunk in pending.chunks(STEAM_SUMMARIES_BATCH) {
+            match request_existing_steam_accounts(&self.api_key, chunk) {
+                Ok(found) => {
+                    for id in found {
+                        self.cache.insert(id, AccountStatus::Exists);
+                    }
+                }
+                Err(SteamApiError::BadKey) => {
+                    eprintln!("Steam API key was rejected, checking accounts without it");
+                    self.api_key.clear();
+                    return;
+                }
+                // Rate limited or unreachable: get_status falls back to the XML lookups
+                Err(_) => return,
+            }
         }
     }
 
@@ -729,7 +776,7 @@ fn run_bulk_scan(
         }
         drop(result_sender);
         let mut finished: HashMap<usize, BulkDemoResult> = HashMap::new();
-        let mut account_checker = SteamAccountChecker::new();
+        let mut account_checker = SteamAccountChecker::with_config(config);
 
         for (idx, demo_path) in demo_files.iter().enumerate() {
             let result = loop {
@@ -866,6 +913,8 @@ fn run_bulk_scan(
             if ignore_deleted {
                 let mut unique_players: HashSet<u64> = all_detections.iter().map(|d| d.player).collect();
                 unique_players.remove(&0);
+                unique_players.retain(|p| !reported_ids.as_ref().is_some_and(|ids| ids.contains(p)));
+                account_checker.prefetch(&unique_players);
                 for &player in &unique_players {
                     let is_marked = reported_ids.as_ref().map_or(false, |ids| ids.contains(&player));
                     if !is_marked {
@@ -1723,8 +1772,14 @@ fn main() -> Result<(), Error> {
     }
 
     if ignore_deleted {
-        let mut account_checker = SteamAccountChecker::new();
-        let unique_players: HashSet<u64> = analyser.detections.iter().map(|d| d.player).filter(|&p| p != 0).collect();
+        let mut account_checker = SteamAccountChecker::with_config(&config);
+        let unique_players: HashSet<u64> = analyser
+            .detections
+            .iter()
+            .map(|d| d.player)
+            .filter(|&p| p != 0 && !reported_ids.as_ref().is_some_and(|ids| ids.contains(&p)))
+            .collect();
+        account_checker.prefetch(&unique_players);
         for &player in &unique_players {
             let is_marked = reported_ids.as_ref().map_or(false, |ids| ids.contains(&player));
             if !is_marked {

@@ -22,6 +22,25 @@ use crate::lib::parameters::{Parameter, Parameters};
 use crate::util::helpers::find_default_tf2_dir;
 use super::client::RconClient;
 use super::vote_notifier::{VoteNotifier, VOTE_ALGORITHM};
+use crate::debug_log;
+
+/// Prints a live scanner message and writes it to the debug log (`--debug`).
+macro_rules! live_log {
+    ($($arg:tt)*) => {{
+        let line = format!($($arg)*);
+        println!("{line}");
+        debug_log!("{line}");
+    }};
+}
+
+/// Like `live_log!`, on stderr.
+macro_rules! live_elog {
+    ($($arg:tt)*) => {{
+        let line = format!($($arg)*);
+        eprintln!("{line}");
+        debug_log!("{line}");
+    }};
+}
 
 #[derive(Debug, Clone)]
 pub struct RealTimeScanConfig {
@@ -214,6 +233,11 @@ pub fn find_tf2_root_dir() -> Option<PathBuf> {
 /// 3. Was modified within the last 60 seconds
 /// 4. Has not been finished (see `is_demo_recording_finished`)
 pub fn find_recording_demo() -> Option<PathBuf> {
+    find_recording_demo_traced(&mut |_| {})
+}
+
+/// `find_recording_demo`, reporting the folders searched and why recent demos were skipped.
+pub fn find_recording_demo_traced(trace: &mut dyn FnMut(String)) -> Option<PathBuf> {
     let mut search_dirs = Vec::new();
     if let Some(demos_dir) = find_default_tf2_dir() {
         search_dirs.push(demos_dir.clone());
@@ -234,11 +258,18 @@ pub fn find_recording_demo() -> Option<PathBuf> {
 
     let mut newest_candidate: Option<(PathBuf, std::time::SystemTime)> = None;
 
+    if search_dirs.is_empty() {
+        trace("Recording search: TF2 folder not found".to_string());
+    }
     for dir in search_dirs {
         let entries = match std::fs::read_dir(&dir) {
             Ok(e) => e,
-            Err(_) => continue,
+            Err(e) => {
+                trace(format!("Recording search: cannot list {}: {e}", dir.display()));
+                continue;
+            }
         };
+        trace(format!("Recording search: looking in {}", dir.display()));
 
         for entry in entries.flatten() {
             let path = entry.path();
@@ -248,6 +279,20 @@ pub fn find_recording_demo() -> Option<PathBuf> {
                     .map_or(false, |ext| ext.eq_ignore_ascii_case("dem"))
             {
                 if let Ok(meta) = path.metadata() {
+                    // Only demos changed in the last 10 minutes are reported, the others are old ones
+                    if meta.modified().ok().and_then(|m| m.elapsed().ok()).map_or(false, |e| e.as_secs() <= 600) {
+                        trace(format!(
+                            "  {}: {} bytes, modified {}s ago, finished={}, shared open={}",
+                            path.display(),
+                            meta.len(),
+                            meta.modified().ok().and_then(|m| m.elapsed().ok()).map_or(0, |e| e.as_secs()),
+                            is_demo_recording_finished(&path),
+                            match open_recording_file(&path) {
+                                Ok(_) => "OK".to_string(),
+                                Err(e) => format!("FAILED ({e})"),
+                            }
+                        ));
+                    }
                     if meta.len() >= 1072 && !is_demo_recording_finished(&path) {
                         if let Ok(modified) = meta.modified() {
                             if let Ok(elapsed) = modified.elapsed() {
@@ -576,7 +621,7 @@ pub fn ensure_vote_algorithm(algorithms: &mut Vec<Box<dyn CheatAlgorithm<'static
         match get_algorithms().into_iter().find(|a| a.algorithm_name() == VOTE_ALGORITHM) {
             Some(algo) => algorithms.push(algo),
             None => {
-                println!("[Live Scanner] {VOTE_ALGORITHM} is not part of this build — no vote notifications");
+                live_log!("[Live Scanner] {VOTE_ALGORITHM} is not part of this build — no vote notifications");
                 return;
             }
         }
@@ -596,10 +641,71 @@ fn send_party_lines(rcon_client: &mut RconClient, lines: &[String]) {
         return;
     }
     for line in lines {
-        println!("[Live Scanner] Party alert sent: {line}");
-        let _ = rcon_client.send_party_chat(line);
+        live_log!("[Live Scanner] Party alert sent: {line}");
+        if let Err(e) = rcon_client.send_party_chat(line) {
+            debug_log!("[Live Scanner] Party chat send failed: {e}");
+        }
         std::thread::sleep(Duration::from_millis(300));
     }
+}
+
+/// `--debug`: checks that RCON commands really run in TF2 by echoing a unique line into its console,
+/// then looks for the line in the RCON reply and in `console.log` (which death detection, recording
+/// detection and `status` parsing read).
+fn verify_rcon_console(rcon_client: &mut RconClient) {
+    let nonce = format!(
+        "{:x}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos() as u64)
+    );
+    let marker = format!("[Demo Analysis] RCON debug check {nonce}");
+    let log_path = find_tf2_root_dir().map(|d| d.join("console.log"));
+    let start_pos = log_path.as_ref().and_then(|p| std::fs::metadata(p).ok()).map(|m| m.len());
+    debug_log!("[RCON check] Echoing \"{marker}\" into the TF2 console");
+    match rcon_client.send_command(&format!("echo \"{marker}\"")) {
+        Ok(reply) => debug_log!(
+            "[RCON check] RCON reply: {:?} -> {}",
+            reply.trim(),
+            if reply.contains(&nonce) {
+                "contains the marker: TF2 ran the command"
+            } else {
+                "marker NOT in the reply (TF2 may still have run it, see console.log below)"
+            }
+        ),
+        Err(e) => {
+            debug_log!("[RCON check] FAILED to send the echo command: {e}");
+            return;
+        }
+    }
+    let Some(log_path) = log_path else {
+        debug_log!("[RCON check] TF2 folder not found, console.log cannot be checked");
+        return;
+    };
+    let started = Instant::now();
+    loop {
+        if read_log_since(&log_path, start_pos.unwrap_or(0)).map_or(false, |t| t.contains(&nonce)) {
+            debug_log!(
+                "[RCON check] OK: the marker appeared in {} after {} ms (RCON commands run in TF2 and console.log is written)",
+                log_path.display(),
+                started.elapsed().as_millis()
+            );
+            return;
+        }
+        if started.elapsed() >= Duration::from_secs(3) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    debug_log!(
+        "[RCON check] FAILED: the marker did not appear in {} within 3 s ({}). Death detection, recording detection and marked cheater warnings will not work; \
+         check that this is the folder of the running TF2 or add -condebug to the launch options.",
+        log_path.display(),
+        match std::fs::metadata(&log_path) {
+            Ok(m) => format!("file is {} bytes, was {:?}", m.len(), start_pos),
+            Err(e) => format!("file not available: {e}"),
+        }
+    );
 }
 
 /// Background worker managing real-time demo detection, death tracking, scanning, and RCON notifications.
@@ -671,7 +777,7 @@ impl RealTimeScanner {
                                 .map(|s| s.to_string())
                                 .or_else(|| panic.downcast_ref::<String>().cloned())
                                 .unwrap_or_else(|| "unknown error".to_string());
-                            eprintln!("[Live Scanner] Crashed ({msg}), restarting");
+                            live_elog!("[Live Scanner] Crashed ({msg}), restarting");
                             let _ = self.tx.send(RealTimeScanEvent::RconConnected(false));
                             let _ = self
                                 .tx
@@ -709,11 +815,26 @@ impl RealTimeScanner {
         // (console.log position before `status` was sent, time it was sent)
         let mut pending_status: Option<(u64, Instant)> = None;
         let mut console_demo_tracker = ConsoleDemoTracker::default();
+        // `--debug`: last logged states, so the log only gets a line when something changes
+        let mut dbg_enabled: Option<bool> = None;
+        let mut dbg_config = String::new();
+        let mut dbg_tf_dir: Option<Option<PathBuf>> = None;
+        let mut dbg_console_log: Option<String> = None;
+        let mut dbg_console_demo: Option<Option<PathBuf>> = None;
+        let mut dbg_fallback_demo: Option<Option<PathBuf>> = None;
+        let mut dbg_no_recorder: Option<PathBuf> = None;
+        let mut dbg_last_search_trace = Instant::now() - Duration::from_secs(3600);
+        debug_log!("[Live Scanner] Thread started");
 
         while !std::thread::panicking() {
             std::thread::sleep(Duration::from_millis(600));
 
-            if !self.enabled.load(Ordering::Relaxed) {
+            let enabled = self.enabled.load(Ordering::Relaxed);
+            if dbg_enabled != Some(enabled) {
+                dbg_enabled = Some(enabled);
+                debug_log!("[Live Scanner] Live scanning {}", if enabled { "ENABLED" } else { "disabled" });
+            }
+            if !enabled {
                 if rcon_client.is_connected() {
                     rcon_client.disconnect();
                     let _ = self.tx.send(RealTimeScanEvent::RconStatus("Disconnected".to_string()));
@@ -739,6 +860,41 @@ impl RealTimeScanner {
             }
 
             let cfg = self.config.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            if crate::util::debug_log::enabled() {
+                let summary = format!(
+                    "port={} password={} scan_on_death={} scan_periodic_too={} interval={}s party_chat_alerts={} \
+                     warn_marked_cheaters={} vote_notifications={} ignore_recorder={}",
+                    cfg.port,
+                    if cfg.password.trim().is_empty() { "empty".to_string() } else { format!("{} chars", cfg.password.chars().count()) },
+                    cfg.scan_on_death,
+                    cfg.scan_periodic_too,
+                    cfg.scan_interval_seconds,
+                    cfg.party_chat_alerts,
+                    cfg.warn_marked_cheaters,
+                    cfg.vote_notifications,
+                    cfg.ignore_recorder
+                );
+                if summary != dbg_config {
+                    debug_log!("[Live Scanner] Settings: {summary}");
+                    dbg_config = summary;
+                }
+                let tf_dir = find_tf2_root_dir();
+                if dbg_tf_dir.as_ref() != Some(&tf_dir) {
+                    debug_log!("[Live Scanner] TF2 folder: {:?}", tf_dir);
+                    dbg_tf_dir = Some(tf_dir.clone());
+                }
+                let log_state = match tf_dir.as_ref().map(|d| d.join("console.log")) {
+                    None => "no TF2 folder".to_string(),
+                    Some(p) => match open_recording_file(&p) {
+                        Ok(_) => "readable".to_string(),
+                        Err(e) => format!("NOT readable: {e}"),
+                    },
+                };
+                if dbg_console_log.as_ref() != Some(&log_state) {
+                    debug_log!("[Live Scanner] console.log: {log_state}");
+                    dbg_console_log = Some(log_state);
+                }
+            }
             let ignored_recorder = if cfg.ignore_recorder {
                 local_steam_id().or(recorder_id_from_demo)
             } else {
@@ -767,13 +923,20 @@ impl RealTimeScanner {
             if !rcon_client.is_connected() {
                 if cfg.password.trim().is_empty() {
                     if prev_rcon_connected != Some(false) {
+                        debug_log!("[Live Scanner] No RCON password configured: not connecting (scans fall back to the interval)");
                         let _ = self.tx.send(RealTimeScanEvent::RconStatus("No password configured".to_string()));
                     }
                 } else if last_reconnect_attempt.elapsed() >= reconnect_backoff {
                     last_reconnect_attempt = Instant::now();
                     match rcon_client.connect() {
                         Ok(()) => {
-                            let _ = rcon_client.send_command("con_logfile console.log");
+                            debug_log!("[Live Scanner] RCON connected to {}", rcon_client.config.server_address);
+                            if let Err(e) = rcon_client.send_command("con_logfile console.log") {
+                                debug_log!("[Live Scanner] Sending con_logfile failed: {e}");
+                            }
+                            if crate::util::debug_log::enabled() && rcon_client.is_connected() {
+                                verify_rcon_console(&mut rcon_client);
+                            }
                             let _ = self.tx.send(RealTimeScanEvent::RconStatus("Connected ✓".to_string()));
                             reconnect_backoff = Duration::from_secs(5);
                         }
@@ -781,14 +944,14 @@ impl RealTimeScanner {
                             // TF2 bans 127.0.0.1 from RCON (until it is restarted) after a few wrong
                             // passwords, so a wrong one is only retried once the password or port changes.
                             reconnect_backoff = Duration::MAX;
-                            eprintln!("[Live Scanner] {e} — not retrying until the RCON settings change");
+                            live_elog!("[Live Scanner] {e} — not retrying until the RCON settings change");
                             let _ = self.tx.send(RealTimeScanEvent::RconStatus(format!(
                                 "Disconnected: {e} (not retried until the RCON settings change)"
                             )));
                         }
                         Err(e) => {
                             reconnect_backoff = reconnect_backoff.saturating_mul(2).min(Duration::from_secs(30));
-                            eprintln!("[Live Scanner] RCON connection failed: {e}");
+                            live_elog!("[Live Scanner] RCON connection failed: {e}");
                             let _ = self.tx.send(RealTimeScanEvent::RconStatus(format!(
                                 "Disconnected (retry in {}s): {}",
                                 reconnect_backoff.as_secs(),
@@ -815,7 +978,15 @@ impl RealTimeScanner {
                 if let Some((pos, sent_at)) = pending_status {
                     if sent_at.elapsed() >= STATUS_REPLY_DELAY {
                         pending_status = None;
-                        if let Some(text) = read_log_since(&log_path, pos) {
+                        let status_text = read_log_since(&log_path, pos);
+                        debug_log!(
+                            "[Live Scanner] status reply: {}",
+                            match &status_text {
+                                Some(t) => format!("{} bytes in console.log, {} players parsed", t.len(), parse_status_players(t).len()),
+                                None => format!("could not read {}", log_path.display()),
+                            }
+                        );
+                        if let Some(text) = status_text {
                             let players = parse_status_players(&text);
                             if !players.is_empty() {
                                 let marked = if cfg.warn_marked_cheaters {
@@ -845,8 +1016,10 @@ impl RealTimeScanner {
                                         (false, Some(tag)) => format!("[Analyser] Marked player on server ({tag}): {name}"),
                                         (false, None) => continue,
                                     };
-                                    println!("[Live Scanner] Party alert sent: {alert}");
-                                    let _ = rcon_client.send_party_chat(&alert);
+                                    live_log!("[Live Scanner] Party alert sent: {alert}");
+                                    if let Err(e) = rcon_client.send_party_chat(&alert) {
+                                        debug_log!("[Live Scanner] Party chat send failed: {e}");
+                                    }
                                     announced.push(name.clone());
                                     std::thread::sleep(Duration::from_millis(300));
                                 }
@@ -859,14 +1032,23 @@ impl RealTimeScanner {
                 } else if last_status_request.elapsed() >= STATUS_POLL_INTERVAL {
                     last_status_request = Instant::now();
                     let pos = std::fs::metadata(&log_path).map(|m| m.len()).unwrap_or(0);
-                    if rcon_client.send_command("status").is_ok() {
-                        pending_status = Some((pos, Instant::now()));
+                    match rcon_client.send_command("status") {
+                        Ok(_) => pending_status = Some((pos, Instant::now())),
+                        Err(e) => debug_log!("[Live Scanner] status command failed: {e}"),
                     }
                 }
             }
 
             // The demo the console says is being recorded (right from the start, whatever the file's age)
             let console_demo = find_tf2_root_dir().and_then(|dir| console_demo_tracker.poll(&dir));
+            if dbg_console_demo.as_ref() != Some(&console_demo) {
+                debug_log!(
+                    "[Live Scanner] console.log says recording: {:?} (last 'Recording to' line: {:?})",
+                    console_demo,
+                    console_demo_tracker.recording
+                );
+                dbg_console_demo = Some(console_demo.clone());
+            }
 
             // Check if active demo is still being recorded
             let still_recording = if let Some(ref path) = active_demo {
@@ -886,7 +1068,7 @@ impl RealTimeScanner {
 
             if !still_recording {
                 if let Some(path) = active_demo.take() {
-                    println!("[Live Scanner] Recording stopped: {} — no longer scanning it", path.display());
+                    live_log!("[Live Scanner] Recording stopped: {} — no longer scanning it", path.display());
                     // Announce a votekick that was still going on when the recording ended
                     if let Some(notifier) = vote_notifier.as_mut() {
                         let lines = notifier.flush(&live_progress.raw_detections);
@@ -907,7 +1089,21 @@ impl RealTimeScanner {
                 active_demo.clone()
             } else {
                 // Console output first, the newest demo file being written as fallback
-                console_demo.clone().or_else(find_recording_demo)
+                console_demo.clone().or_else(|| {
+                    let trace_now = crate::util::debug_log::enabled()
+                        && dbg_last_search_trace.elapsed() >= Duration::from_secs(30);
+                    let found = if trace_now {
+                        dbg_last_search_trace = Instant::now();
+                        find_recording_demo_traced(&mut |line| debug_log!("[Live Scanner] {line}"))
+                    } else {
+                        find_recording_demo()
+                    };
+                    if dbg_fallback_demo.as_ref() != Some(&found) {
+                        debug_log!("[Live Scanner] Recording demo by file time: {:?}", found);
+                        dbg_fallback_demo = Some(found.clone());
+                    }
+                    found
+                })
             };
 
             let demo_path = match current_demo {
@@ -936,7 +1132,7 @@ impl RealTimeScanner {
 
                 last_scan_time = Instant::now();
                 last_death_scan_time = Instant::now();
-                println!("[Live Scanner] Detected recording demo: {} (Recorder: {:?})", demo_path.display(), recorder_name);
+                live_log!("[Live Scanner] Detected recording demo: {} (Recorder: {:?})", demo_path.display(), recorder_name);
                 let _ = self.tx.send(RealTimeScanEvent::DemoDetected {
                     demo_path: demo_path.clone(),
                     recorder_name: recorder_name.clone(),
@@ -960,10 +1156,14 @@ impl RealTimeScanner {
                 }
                 if let Some(ref mut dt) = death_tracker {
                     let rec_name = recorder_name.as_deref().unwrap_or("");
+                    if rec_name.is_empty() && dbg_no_recorder.as_ref() != Some(&demo_path) {
+                        debug_log!("[Live Scanner] Recorder name unknown (empty demo header nick): death detection cannot work");
+                        dbg_no_recorder = Some(demo_path.clone());
+                    }
                     if !rec_name.is_empty() && dt.check_death(rec_name) {
                         // Debounce death triggers with 5-second cooldown
                         if last_death_scan_time.elapsed().as_secs() >= 5 {
-                            println!("[Live Scanner] Player death detected for '{rec_name}' — triggering scan");
+                            live_log!("[Live Scanner] Player death detected for '{rec_name}' — triggering scan");
                             let _ = self.tx.send(RealTimeScanEvent::DeathDetected { victim: rec_name.to_string() });
                             should_scan = true;
                             last_death_scan_time = Instant::now();
@@ -975,7 +1175,7 @@ impl RealTimeScanner {
                 // Fall back to periodic scanning on the configured interval.
                 if last_scan_time.elapsed().as_secs() >= interval {
                     if cfg.scan_on_death && !currently_connected {
-                        println!("[Live Scanner] RCON not connected — falling back to periodic scan (every {}s)", interval);
+                        live_log!("[Live Scanner] RCON not connected — falling back to periodic scan (every {}s)", interval);
                     }
                     should_scan = true;
                 }
@@ -995,7 +1195,14 @@ impl RealTimeScanner {
 
                 let bytes = match read_recording_demo_bytes(&demo_path) {
                     Ok(b) if b.len() >= 1072 => b,
-                    _ => continue,
+                    Ok(b) => {
+                        debug_log!("[Live Scanner] Demo too short to scan yet ({} bytes): {}", b.len(), demo_path.display());
+                        continue;
+                    }
+                    Err(e) => {
+                        debug_log!("[Live Scanner] Reading {} FAILED: {e} (kind {:?}, os error {:?})", demo_path.display(), e.kind(), e.raw_os_error());
+                        continue;
+                    }
                 };
 
                 let general_settings = {
@@ -1016,6 +1223,7 @@ impl RealTimeScanner {
                 }
 
                 if algorithms.is_empty() {
+                    debug_log!("[Live Scanner] No algorithms enabled for live scans, nothing to scan");
                     continue;
                 }
 
@@ -1046,6 +1254,7 @@ impl RealTimeScanner {
 
                 // Live scans run single-threaded on this thread so they don't compete with the game
                 // (or a manual analysis) for the CPU; only manual analyses use the worker pool.
+                let scan_started = Instant::now();
                 let scan_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     let demo = Demo::new(&bytes);
                     analyse_sequential_from_tick(&demo, algorithms, from_tick).map(|mut analyser| {
@@ -1054,6 +1263,19 @@ impl RealTimeScanner {
                     })
                 }));
 
+                match &scan_res {
+                    Ok(Ok(_)) => debug_log!("[Live Scanner] Analysis took {} ms", scan_started.elapsed().as_millis()),
+                    Ok(Err(e)) => debug_log!("[Live Scanner] Analysis FAILED after {} ms: {e}", scan_started.elapsed().as_millis()),
+                    Err(panic) => debug_log!(
+                        "[Live Scanner] Analysis PANICKED after {} ms: {}",
+                        scan_started.elapsed().as_millis(),
+                        panic
+                            .downcast_ref::<&str>()
+                            .map(|s| s.to_string())
+                            .or_else(|| panic.downcast_ref::<String>().cloned())
+                            .unwrap_or_else(|| "unknown error".to_string())
+                    ),
+                }
                 if let Ok(Ok(mut analyser)) = scan_res {
                     // Still in the signon data: the next scan starts from the beginning again
                     let scanned_until = analysed_until(&analyser);
@@ -1079,7 +1301,7 @@ impl RealTimeScanner {
                             let lines = notifier.collect(all_detections, analysed_until);
                             // Every individual vote goes to the console only, never the party chat
                             for line in notifier.console_lines(all_detections) {
-                                println!("[Live Scanner] {line}");
+                                live_log!("[Live Scanner] {line}");
                             }
                             lines
                         })
@@ -1112,8 +1334,10 @@ impl RealTimeScanner {
                     let alerts_sent = if cfg.party_chat_alerts && !new_notifications.is_empty() && rcon_client.is_connected() {
                         for (player_name, algo, _tick) in &new_notifications {
                             let alert = format!("[Analyser] {} flagged for {}", player_name, algo);
-                            println!("[Live Scanner] Party alert sent: {alert}");
-                            let _ = rcon_client.send_party_chat(&alert);
+                            live_log!("[Live Scanner] Party alert sent: {alert}");
+                            if let Err(e) = rcon_client.send_party_chat(&alert) {
+                                        debug_log!("[Live Scanner] Party chat send failed: {e}");
+                                    }
                             std::thread::sleep(Duration::from_millis(300));
                         }
                         true

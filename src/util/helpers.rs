@@ -1,7 +1,7 @@
 // Put individual functions with widespread utility in here.
 // For more complicated structures, consider making your own file in the /util directory.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::{BuildHasherDefault, Hasher};
 use std::path::{Path, PathBuf};
 use steamid_ng::SteamID;
@@ -192,6 +192,58 @@ pub fn request_steam_profile_xml(steam_id: u64) -> Result<ureq::Response, ureq::
         Err(ureq::Error::Status(429, _)) => request(Some("identity")),
         result => result,
     }
+}
+
+/// SteamIDs per `ISteamUser/GetPlayerSummaries` request at most.
+pub const STEAM_SUMMARIES_BATCH: usize = 100;
+
+/// Why a Steam Web API account lookup gave no answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SteamApiError {
+    RateLimited,
+    /// 401/403: the key is invalid or revoked; further requests with it are pointless.
+    BadKey,
+    Failed,
+}
+
+/// Looks up accounts with the Steam Web API (`ISteamUser/GetPlayerSummaries`, needs an API key,
+/// at most `STEAM_SUMMARIES_BATCH` ids) and returns the ones Steam returned a summary for: these
+/// accounts exist. An id missing from the answer is most likely deleted, but the API does not say
+/// why it left one out, so callers confirm those with the community XML profile
+/// (`request_steam_profile_xml`). Unlike the community pages, the Web API is not rate limited after
+/// a few dozen requests (100 000 calls per key and day).
+pub fn request_existing_steam_accounts(key: &str, steam_ids: &[u64]) -> Result<HashSet<u64>, SteamApiError> {
+    if steam_ids.is_empty() {
+        return Ok(HashSet::new());
+    }
+    let ids = steam_ids
+        .iter()
+        .take(STEAM_SUMMARIES_BATCH)
+        .map(|id| id.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    let response = ureq::get("https://api.steampowered.com/ISteamUser/GetPlayerSummaries/v2/")
+        .query("key", key.trim())
+        .query("steamids", &ids)
+        .timeout(std::time::Duration::from_secs(15))
+        .call();
+    let body: serde_json::Value = match response {
+        Ok(r) => {
+            let text = r.into_string().map_err(|_| SteamApiError::Failed)?;
+            serde_json::from_str(&text).map_err(|_| SteamApiError::Failed)?
+        }
+        Err(ureq::Error::Status(429, _)) => return Err(SteamApiError::RateLimited),
+        Err(ureq::Error::Status(401 | 403, _)) => return Err(SteamApiError::BadKey),
+        Err(_) => return Err(SteamApiError::Failed),
+    };
+    let players = body["response"]["players"].as_array().ok_or(SteamApiError::Failed)?;
+    Ok(players
+        .iter()
+        .filter_map(|p| match &p["steamid"] {
+            serde_json::Value::String(s) => s.parse::<u64>().ok(),
+            v => v.as_u64(),
+        })
+        .collect())
 }
 
 /// Fast non-cryptographic hasher (the FxHash used by rustc). Much cheaper than the default
@@ -732,17 +784,48 @@ fn normalize_tf2_dir(p: std::path::PathBuf) -> Option<std::path::PathBuf> {
 }
 
 pub fn find_default_tf2_dir() -> Option<std::path::PathBuf> {
+    find_default_tf2_dir_traced(&mut |_| {})
+}
+
+/// `find_default_tf2_dir`, reporting every location it checks to `trace` (for the debug log).
+pub fn find_default_tf2_dir_traced(trace: &mut dyn FnMut(String)) -> Option<std::path::PathBuf> {
+    // Checks one candidate `tf` folder and reports it
+    let check = |label: &str, p: &std::path::Path, trace: &mut dyn FnMut(String)| -> bool {
+        let found = p.is_dir();
+        trace(format!("{label}: {} -> {}", p.display(), if found { "found" } else { "not found" }));
+        found
+    };
+
     // 0. Manual override from the GUI
     let manual = TF2_DIR_OVERRIDE.lock().ok().and_then(|g| g.clone());
-    if let Some(dir) = manual.and_then(normalize_tf2_dir) {
-        return Some(dir);
+    match &manual {
+        Some(dir) => {
+            let resolved = normalize_tf2_dir(dir.clone());
+            trace(format!(
+                "Manual TF2 folder setting: {} -> {}",
+                dir.display(),
+                resolved.as_ref().map_or("not a folder, ignored".to_string(), |p| format!("uses {}", p.display()))
+            ));
+            if let Some(dir) = resolved {
+                return Some(dir);
+            }
+        }
+        None => trace("Manual TF2 folder setting: empty".to_string()),
     }
 
     // 1. Environment variable override
-    if let Ok(dir) = std::env::var("TF2_DIR") {
-        if let Some(p) = normalize_tf2_dir(std::path::PathBuf::from(dir)) {
-            return Some(p);
+    match std::env::var("TF2_DIR") {
+        Ok(dir) => {
+            let resolved = normalize_tf2_dir(std::path::PathBuf::from(&dir));
+            trace(format!(
+                "TF2_DIR environment variable: {dir} -> {}",
+                resolved.as_ref().map_or("not a folder, ignored".to_string(), |p| format!("uses {}", p.display()))
+            ));
+            if let Some(p) = resolved {
+                return Some(p);
+            }
         }
+        Err(_) => trace("TF2_DIR environment variable: not set".to_string()),
     }
 
     // 2. Windows checks
@@ -750,41 +833,50 @@ pub fn find_default_tf2_dir() -> Option<std::path::PathBuf> {
     {
         // 2a. Common standard install locations
         let common = std::path::PathBuf::from(r"C:\Program Files (x86)\Steam\steamapps\common\Team Fortress 2\tf");
-        if common.is_dir() {
+        if check("Default install", &common, trace) {
             return Some(resolve_tf2_demos_dir(common));
         }
 
         let common_pf = std::path::PathBuf::from(r"C:\Program Files\Steam\steamapps\common\Team Fortress 2\tf");
-        if common_pf.is_dir() {
+        if check("Default install", &common_pf, trace) {
             return Some(resolve_tf2_demos_dir(common_pf));
         }
 
         // 2b. From Steam install path via registry
-        if let Some(steam_path) = get_steam_install_path() {
+        let steam_path = get_steam_install_path();
+        trace(format!(
+            "Steam install path (registry): {}",
+            steam_path.as_ref().map_or("not found".to_string(), |p| p.display().to_string())
+        ));
+        if let Some(steam_path) = steam_path {
             let tf2 = steam_path.join("steamapps").join("common").join("Team Fortress 2").join("tf");
-            if tf2.is_dir() {
+            if check("Steam folder", &tf2, trace) {
                 return Some(resolve_tf2_demos_dir(tf2));
             }
 
             // 2c. Check additional Steam library folders from libraryfolders.vdf
             let vdf_path = steam_path.join("steamapps").join("libraryfolders.vdf");
-            if let Ok(vdf) = std::fs::read_to_string(&vdf_path) {
-                for line in vdf.lines() {
-                    let trimmed = line.trim();
-                    if trimmed.starts_with("\"path\"") {
-                        if let Some(first_quote) = trimmed.find('"') {
-                            if let Some(second_quote) = trimmed[first_quote + 1..].find('"') {
-                                let rem = &trimmed[first_quote + 1 + second_quote + 1..];
-                                let path_val = rem.trim().trim_matches('"');
-                                let lib_folder = std::path::PathBuf::from(path_val.replace(r"\\", r"\"));
-                                let tf2_lib = lib_folder.join("steamapps").join("common").join("Team Fortress 2").join("tf");
-                                if tf2_lib.is_dir() {
-                                    return Some(resolve_tf2_demos_dir(tf2_lib));
+            match std::fs::read_to_string(&vdf_path) {
+                Ok(vdf) => {
+                    trace(format!("Read {} ({} bytes)", vdf_path.display(), vdf.len()));
+                    for line in vdf.lines() {
+                        let trimmed = line.trim();
+                        if trimmed.starts_with("\"path\"") {
+                            if let Some(first_quote) = trimmed.find('"') {
+                                if let Some(second_quote) = trimmed[first_quote + 1..].find('"') {
+                                    let rem = &trimmed[first_quote + 1 + second_quote + 1..];
+                                    let path_val = rem.trim().trim_matches('"');
+                                    let lib_folder = std::path::PathBuf::from(path_val.replace(r"\\", r"\"));
+                                    let tf2_lib = lib_folder.join("steamapps").join("common").join("Team Fortress 2").join("tf");
+                                    if check("Steam library", &tf2_lib, trace) {
+                                        return Some(resolve_tf2_demos_dir(tf2_lib));
+                                    }
                                 }
                             }
                         }
                     }
                 }
+                Err(e) => trace(format!("Could not read {}: {e}", vdf_path.display())),
             }
         }
 
@@ -796,7 +888,7 @@ pub fn find_default_tf2_dir() -> Option<std::path::PathBuf> {
                 format!(r"{}:\Games\Steam\steamapps\common\Team Fortress 2\tf", drive),
             ] {
                 let p = std::path::PathBuf::from(sub);
-                if p.is_dir() {
+                if check("Common drive path", &p, trace) {
                     return Some(resolve_tf2_demos_dir(p));
                 }
             }
@@ -815,13 +907,14 @@ pub fn find_default_tf2_dir() -> Option<std::path::PathBuf> {
                 home_p.join("Library/Application Support/Steam/steamapps/common/Team Fortress 2/tf"),
             ];
             for c in candidates {
-                if c.is_dir() {
+                if check("Steam folder", &c, trace) {
                     return Some(resolve_tf2_demos_dir(c));
                 }
             }
         }
     }
 
+    trace("TF2 folder not found".to_string());
     None
 }
 

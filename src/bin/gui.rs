@@ -22,6 +22,7 @@ use analysis_template::rcon::{
 };
 #[cfg(feature = "tf2bd")]
 use analysis_template::{tf2bd::Tf2bdSettings, tf2bd_view::Tf2bdUi};
+use analysis_template::{debug_log, util::debug_log};
 use eframe::egui;
 use itertools::Itertools;
 use steamid_ng::SteamID;
@@ -41,10 +42,30 @@ fn main() {
     #[cfg(not(algo_cost_learning))]
     let (log_file, log_file_clone): (Option<std::path::PathBuf>, Option<std::path::PathBuf>) = (None, None);
 
+    // `--debug`: write a debug log (overwritten on every launch); nothing is written without it
+    let debug_log_path = if std::env::args().skip(1).any(|a| a == debug_log::DEBUG_FLAG) {
+        match debug_log::init() {
+            Ok(path) => {
+                analysis_template::util::diagnostics::log_environment();
+                debug_log!("Debug log file: {}", path.display());
+                debug_log!("params.json: {} (exists: {})", Gui::params_path().display(), Gui::params_path().is_file());
+                Some(path)
+            }
+            Err(e) => {
+                eprintln!("Could not create the debug log: {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     std::panic::set_hook({
         let log_file = log_file.clone();
         Box::new(move |info| {
             eprintln!("GUI PANIC: {:?}", info);
+            debug_log!("PANIC: {info}
+{}", std::backtrace::Backtrace::force_capture());
             if let Some(ref file) = log_file {
                 let _ = std::fs::write(file, format!("PANIC: {:#?}\n", info));
             }
@@ -71,8 +92,12 @@ fn main() {
         viewport,
         ..Default::default()
     };
+    let title = match &debug_log_path {
+        Some(path) => format!("Demo Analysis [debug mode, log: {}]", path.display()),
+        None => "Demo Analysis".to_string(),
+    };
     let res = eframe::run_native(
-        "Demo Analysis",
+        &title,
         options,
         Box::new(move |cc| {
             install_fallback_fonts(&cc.egui_ctx);
@@ -81,6 +106,10 @@ fn main() {
             }
             println!("Calling Gui::new()...");
             let gui = Gui::new();
+            debug_log!("GUI created");
+            if debug_log::enabled() {
+                gui.start_debug_diagnostics();
+            }
             gui.start_update_check(cc.egui_ctx.clone());
             cc.egui_ctx.set_zoom_factor(gui.applied_ui_scale as f32 / 100.0);
             if let Some(ref file) = log_file_clone {
@@ -90,8 +119,10 @@ fn main() {
             Ok(Box::new(gui))
         }),
     );
+    debug_log!("GUI closed ({})", if res.is_ok() { "ok" } else { "error" });
     if let Err(e) = res {
         eprintln!("GUI eframe error: {:#?}", e);
+        debug_log!("eframe error: {e:#?}");
         if let Some(ref file) = log_file {
             let _ = std::fs::write(file, format!("eframe error: {:#?}\n", e));
         }
@@ -334,6 +365,86 @@ fn check_steam_account(steam_id: u64, backoff: &mut Option<std::time::Duration>)
     }
 }
 
+/// The accounts in `ids` that the Steam Web API confirms to exist, when `api_key` is set. The
+/// other ids still need the community XML check (`check_steam_account`), which is what tells a
+/// deleted account apart and is rate limited after a few dozen requests; with a key it only runs
+/// for the few accounts the API did not return. A rejected key is cleared so it is not retried.
+fn existing_accounts_via_api(ids: &[u64], api_key: &mut String) -> HashSet<u64> {
+    use analysis_template::util::helpers::{request_existing_steam_accounts, SteamApiError, STEAM_SUMMARIES_BATCH};
+    let mut existing = HashSet::new();
+    if api_key.trim().is_empty() {
+        return existing;
+    }
+    for chunk in ids.chunks(STEAM_SUMMARIES_BATCH) {
+        match request_existing_steam_accounts(api_key, chunk) {
+            Ok(found) => existing.extend(found),
+            Err(SteamApiError::BadKey) => {
+                eprintln!("Steam API key was rejected, checking accounts without it");
+                api_key.clear();
+                break;
+            }
+            // Rate limited or unreachable: the XML check handles the rest
+            Err(_) => break,
+        }
+    }
+    existing
+}
+
+/// Flagged players (after the sliding window filter) queued for the account checker thread.
+struct AccountCheckRequest {
+    ids: Vec<u64>,
+    /// Steam Web API key from the general settings; empty = community XML lookups only.
+    api_key: String,
+}
+
+/// Account lookups of a bulk scan: results, failed-lookup cooldowns and request pacing.
+struct BulkAccountLookups {
+    accounts: HashMap<u64, AccountStatus>,
+    failed_lookups: HashMap<u64, std::time::Instant>,
+    last_request: Option<std::time::Instant>,
+    backoff: Option<std::time::Duration>,
+    api_key: String,
+}
+
+impl BulkAccountLookups {
+    const REQUEST_INTERVAL: std::time::Duration = std::time::Duration::from_millis(300);
+    const UNKNOWN_RETRY_AFTER: std::time::Duration = std::time::Duration::from_secs(300);
+
+    fn needs_lookup(&self, id: u64) -> bool {
+        id != 0
+            && !matches!(self.accounts.get(&id), Some(AccountStatus::Deleted | AccountStatus::Exists))
+            && !self.failed_lookups.get(&id).is_some_and(|t| t.elapsed() < Self::UNKNOWN_RETRY_AFTER)
+    }
+
+    /// Resolves the existing accounts among `ids` with one Web API request (with a key).
+    fn prefetch(&mut self, ids: &HashSet<u64>) {
+        let ids: Vec<u64> = ids.iter().copied().filter(|&id| self.needs_lookup(id)).collect();
+        for id in existing_accounts_via_api(&ids, &mut self.api_key) {
+            self.accounts.insert(id, AccountStatus::Exists);
+        }
+    }
+
+    fn is_deleted(&mut self, id: u64, cancel: &std::sync::atomic::AtomicBool) -> bool {
+        if self.accounts.get(&id) == Some(&AccountStatus::Deleted) {
+            return true;
+        }
+        if !self.needs_lookup(id) || cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            return false;
+        }
+        if let Some(wait) = self.last_request.and_then(|t| Self::REQUEST_INTERVAL.checked_sub(t.elapsed())) {
+            std::thread::sleep(wait);
+        }
+        let status = check_steam_account(id, &mut self.backoff);
+        self.last_request = Some(std::time::Instant::now());
+        if status == AccountStatus::Unknown {
+            self.failed_lookups.insert(id, std::time::Instant::now());
+        } else {
+            self.accounts.insert(id, status);
+        }
+        status == AccountStatus::Deleted
+    }
+}
+
 /// Counters of a running (or finished) bulk scan, shared between the scan thread and the UI.
 #[derive(Default)]
 struct BulkScanProgress {
@@ -364,6 +475,8 @@ struct BulkScanJob {
     /// Demos from non-Valve servers are not analysed and count as clean (CLI `--valve-only`).
     valve_only: bool,
     known_accounts: HashMap<u64, AccountStatus>,
+    /// Steam Web API key for the account checks; empty = community XML lookups only.
+    steam_api_key: String,
 }
 
 /// State of the bulk scan modal.
@@ -511,36 +624,12 @@ fn run_bulk_scan(job: BulkScanJob, progress: std::sync::Arc<BulkScanProgress>, c
     let was_silent = analysis_template::SILENT.swap(true, Ordering::Relaxed);
     let next_demo = std::sync::atomic::AtomicUsize::new(0);
 
-    let mut accounts = job.known_accounts.clone();
-    let mut failed_lookups: HashMap<u64, std::time::Instant> = HashMap::new();
-    let mut last_request: Option<std::time::Instant> = None;
-    let mut backoff: Option<std::time::Duration> = None;
-    let mut is_deleted = |id: u64, cancel: &std::sync::atomic::AtomicBool| -> bool {
-        if id == 0 {
-            return false;
-        }
-        match accounts.get(&id) {
-            Some(AccountStatus::Deleted) => return true,
-            Some(AccountStatus::Exists) => return false,
-            _ => {}
-        }
-        if cancel.load(Ordering::Relaxed)
-            || failed_lookups.get(&id).is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(300))
-        {
-            return false;
-        }
-        const REQUEST_INTERVAL: std::time::Duration = std::time::Duration::from_millis(300);
-        if let Some(wait) = last_request.and_then(|t| REQUEST_INTERVAL.checked_sub(t.elapsed())) {
-            std::thread::sleep(wait);
-        }
-        let status = check_steam_account(id, &mut backoff);
-        last_request = Some(std::time::Instant::now());
-        if status == AccountStatus::Unknown {
-            failed_lookups.insert(id, std::time::Instant::now());
-        } else {
-            accounts.insert(id, status);
-        }
-        status == AccountStatus::Deleted
+    let mut lookups = BulkAccountLookups {
+        accounts: job.known_accounts.clone(),
+        failed_lookups: HashMap::new(),
+        last_request: None,
+        backoff: None,
+        api_key: job.steam_api_key.clone(),
     };
     let add_failure = |name: &str, reason: String| {
         progress.failed.fetch_add(1, Ordering::Relaxed);
@@ -590,11 +679,19 @@ fn run_bulk_scan(job: BulkScanJob, progress: std::sync::Arc<BulkScanProgress>, c
                         Vec::new()
                     });
                     let mut qualifying = 0;
+                    if job.ignore_deleted && !progress.cancel.load(Ordering::Relaxed) {
+                        let players: HashSet<u64> = detections
+                            .iter()
+                            .map(|d| d.player)
+                            .filter(|p| !job.reported_ids.contains(p))
+                            .collect();
+                        lookups.prefetch(&players);
+                    }
                     for d in &detections {
                         let ignored = if job.reported_ids.contains(&d.player) {
                             job.ignore_marked
                         } else {
-                            job.ignore_deleted && is_deleted(d.player, &progress.cancel)
+                            job.ignore_deleted && lookups.is_deleted(d.player, &progress.cancel)
                         };
                         if !ignored {
                             qualifying += 1;
@@ -873,6 +970,8 @@ struct Gui {
     delete_replays_feedback: Option<(std::time::Instant, Result<usize, String>)>,
     #[cfg(feature = "experimental")]
     voice_export_feedback: Option<(std::time::Instant, Result<analysis_template::util::voice::VoiceExportSummary, String>)>,
+    // recording date
+    recording_date: analysis_template::recording_date_view::RecordingDateView,
     show_delete_replays_prompt: bool,
     bulk_scan: BulkScanUi,
     save_feedback: Option<(std::time::Instant, Result<(), String>)>,
@@ -936,7 +1035,7 @@ struct Gui {
     account_status: HashMap<u64, AccountStatus>,
     deleted_accounts: HashSet<u64>,
     existing_accounts: HashSet<u64>,
-    account_checker_send: std::sync::mpsc::Sender<u64>,
+    account_checker_send: std::sync::mpsc::Sender<AccountCheckRequest>,
     /// Lets the account checker thread repaint the UI when a lookup finishes after the analysis.
     account_checker_ctx: std::sync::Arc<std::sync::OnceLock<egui::Context>>,
     shared_reported_ids: std::sync::Arc<std::sync::RwLock<HashSet<u64>>>,
@@ -971,6 +1070,30 @@ impl Gui {
                 let _ = slot.set(update);
                 ctx.request_repaint();
             }
+        });
+    }
+
+    /// `--debug`: logs the TF2 folder search, file access and RCON related configs on a background
+    /// thread, so a slow drive or network folder does not hold the window up.
+    fn start_debug_diagnostics(&self) {
+        #[cfg(feature = "rcon")]
+        let password = match self.params.get("rcon").and_then(|p| p.get("password")) {
+            Some(Parameter::String(s)) => Some(s.clone()),
+            _ => None,
+        };
+        #[cfg(not(feature = "rcon"))]
+        let password: Option<String> = None;
+        #[cfg(feature = "rcon")]
+        debug_log!(
+            "RCON settings: live scanning={}, port={:?}",
+            matches!(self.params.get("rcon").and_then(|p| p.get("real_time_scanning")), Some(Parameter::Bool(true))),
+            self.params.get("rcon").and_then(|p| p.get("port")),
+        );
+        #[cfg(not(feature = "rcon"))]
+        debug_log!("RCON / live scanning: not part of this build");
+        let _ = std::thread::Builder::new().name("debug-diagnostics".to_string()).spawn(move || {
+            analysis_template::util::diagnostics::log_tf2_setup(password.as_deref());
+            debug_log!("--- Startup diagnostics finished ---");
         });
     }
 
@@ -1303,6 +1426,9 @@ impl Gui {
             .or_insert(Parameter::Bool(false));
         // Kept in the stable build too, so saving there does not drop the setting.
         gen_params
+            .entry(Self::STEAM_API_KEY.to_string())
+            .or_insert(Parameter::String(String::new()));
+        gen_params
             .entry(Self::VOICE_GAP_KEY.to_string())
             .or_insert(Parameter::Float(Self::DEFAULT_VOICE_GAP_SECS));
         let tf2_dir =gen_params
@@ -1492,7 +1618,7 @@ impl Gui {
         };
 
         let (account_status_send, account_status_recv) = std::sync::mpsc::channel();
-        let (account_checker_send, account_checker_recv) = std::sync::mpsc::channel::<u64>();
+        let (account_checker_send, account_checker_recv) = std::sync::mpsc::channel::<AccountCheckRequest>();
         let shared_reported_ids = std::sync::Arc::new(std::sync::RwLock::new(initial_reported_ids.clone()));
         let account_checker_ctx = std::sync::Arc::new(std::sync::OnceLock::<egui::Context>::new());
 
@@ -1525,7 +1651,6 @@ impl Gui {
                             .unwrap_or_else(|| "unknown error".to_string());
                         Err(anyhow::anyhow!("The analysis crashed: {msg}"))
                     });
-                    analysis_template::set_detection_listener(None);
                     // A cancelled analysis must not make the next (live) scan abort as well
                     analysis_template::CANCEL_ANALYSIS.store(false, std::sync::atomic::Ordering::Relaxed);
                     let _ = send.send(result);
@@ -1541,36 +1666,52 @@ impl Gui {
             std::thread::Builder::new()
                 .name("account-checker".to_string())
                 .spawn(move || {
-                    // The listener sends a player once per detection, so the same id arrives many
-                    // times. Resolved ids are never looked up again; failed ones (`Some(time)`) only
-                    // after a cooldown, otherwise every queued duplicate would trigger a request.
+                    // Every analysis and live scan queues all its flagged players again. Resolved
+                    // ids are never looked up again; failed ones (`Some(time)`) only after a
+                    // cooldown, otherwise every live scan would request them again.
                     let mut checked: HashMap<u64, Option<std::time::Instant>> = HashMap::new();
                     const REQUEST_INTERVAL: std::time::Duration = std::time::Duration::from_millis(300);
                     const UNKNOWN_RETRY_AFTER: std::time::Duration = std::time::Duration::from_secs(300);
                     let mut last_request: Option<std::time::Instant> = None;
                     let mut backoff: Option<std::time::Duration> = None;
-                    for id in account_checker_recv {
-                        if let Ok(guard) = reported.read() {
-                            if guard.contains(&id) {
-                                continue;
+                    while let Ok(request) = account_checker_recv.recv() {
+                        let AccountCheckRequest { mut ids, mut api_key } = request;
+                        // Requests queued meanwhile are handled together (one API request)
+                        while let Ok(more) = account_checker_recv.try_recv() {
+                            ids.extend(more.ids);
+                            api_key = more.api_key;
+                        }
+                        ids.sort_unstable();
+                        ids.dedup();
+                        let reported_now = reported.read().map(|g| g.clone()).unwrap_or_default();
+                        ids.retain(|id| {
+                            *id != 0
+                                && !reported_now.contains(id)
+                                && match checked.get(id) {
+                                    Some(None) => false,
+                                    Some(Some(failed_at)) => failed_at.elapsed() >= UNKNOWN_RETRY_AFTER,
+                                    None => true,
+                                }
+                        });
+                        let existing = existing_accounts_via_api(&ids, &mut api_key);
+                        for id in ids {
+                            let status = if existing.contains(&id) {
+                                AccountStatus::Exists
+                            } else {
+                                if let Some(wait) = last_request.and_then(|t| REQUEST_INTERVAL.checked_sub(t.elapsed())) {
+                                    std::thread::sleep(wait);
+                                }
+                                let status = check_steam_account(id, &mut backoff);
+                                last_request = Some(std::time::Instant::now());
+                                status
+                            };
+                            checked.insert(id, (status == AccountStatus::Unknown).then(std::time::Instant::now));
+                            if status_send.send((id, status)).is_err() {
+                                return;
                             }
-                        }
-                        match checked.get(&id) {
-                            Some(None) => continue,
-                            Some(Some(failed_at)) if failed_at.elapsed() < UNKNOWN_RETRY_AFTER => continue,
-                            _ => {}
-                        }
-                        if let Some(wait) = last_request.and_then(|t| REQUEST_INTERVAL.checked_sub(t.elapsed())) {
-                            std::thread::sleep(wait);
-                        }
-                        let status = check_steam_account(id, &mut backoff);
-                        last_request = Some(std::time::Instant::now());
-                        checked.insert(id, (status == AccountStatus::Unknown).then(std::time::Instant::now));
-                        if status_send.send((id, status)).is_err() {
-                            return;
-                        }
-                        if let Some(ctx) = repaint_ctx.get() {
-                            ctx.request_repaint();
+                            if let Some(ctx) = repaint_ctx.get() {
+                                ctx.request_repaint();
+                            }
                         }
                     }
                 })
@@ -1595,6 +1736,8 @@ impl Gui {
             delete_replays_feedback: None,
             #[cfg(feature = "experimental")]
             voice_export_feedback: None,
+            // recording date
+            recording_date: analysis_template::recording_date_view::RecordingDateView::new(),
             show_delete_replays_prompt: false,
             bulk_scan: BulkScanUi::new(),
             save_feedback: None,
@@ -1850,6 +1993,26 @@ impl Gui {
     const SHOW_STRIP_KEY: &'static str = "show_strip_demo_button";
     const VOICE_GAP_KEY: &'static str = "voice_export_max_gap_seconds";
     const DEFAULT_VOICE_GAP_SECS: f32 = 1.0;
+    /// Steam Web API key, used by the recording date estimate to look up item drops.
+    const STEAM_API_KEY: &'static str = "steam_api_key";
+
+    fn steam_api_key(&self) -> String {
+        match self.params.get("general_settings").and_then(|g| g.get(Self::STEAM_API_KEY)) {
+            Some(Parameter::String(s)) => s.trim().to_string(),
+            _ => String::new(),
+        }
+    }
+
+    /// Queues the players shown in the results (`self.detections`, already through the sliding
+    /// window filter) for the deleted account check; already resolved ones are skipped there.
+    fn queue_account_checks(&self, ctx: &egui::Context) {
+        let ids: Vec<u64> = self.detections.keys().copied().filter(|&p| p != 0).collect();
+        if ids.is_empty() {
+            return;
+        }
+        let _ = self.account_checker_ctx.set(ctx.clone());
+        let _ = self.account_checker_send.send(AccountCheckRequest { ids, api_key: self.steam_api_key() });
+    }
 
     fn copy_detailed_detections(&self) -> bool {
         matches!(
@@ -2226,6 +2389,7 @@ impl Gui {
             move_demos: self.bulk_scan.move_demos,
             valve_only: self.bulk_scan.valve_only,
             known_accounts: self.account_status.clone(),
+            steam_api_key: self.steam_api_key(),
         };
         let progress = std::sync::Arc::new(BulkScanProgress::default());
         self.bulk_scan.progress = Some(progress.clone());
@@ -2379,11 +2543,12 @@ impl Gui {
 
         let general_settings = GeneralSettings::from_config(&self.params);
         let file = self.file.clone().unwrap();
+        // recording date
+        self.recording_date.request(&file, &self.steam_api_key(), ctx);
         let send = self.send.clone();
         analysis_template::reset_progress(1);
         analysis_template::CANCEL_ANALYSIS.store(false, std::sync::atomic::Ordering::Relaxed);
         let _ = self.account_checker_ctx.set(ctx.clone());
-        analysis_template::set_detection_listener(Some(self.account_checker_send.clone()));
         self.analysis_error = None;
         self.cancel_requested = false;
 
@@ -2491,6 +2656,7 @@ impl Gui {
                             for det in &analyser.detections {
                                 self.detections.entry(det.player).or_default().push(det.clone());
                             }
+                            self.queue_account_checks(ctx);
                             analyser.print_detection_summary();
                             #[cfg(feature = "rcon")]
                             if live_rescan {
@@ -2569,12 +2735,7 @@ impl Gui {
                                 self.detections.entry(det.player).or_default().push(det.clone());
                             }
                         }
-                        // Live scans run without the detection listener; queue the flagged players
-                        // for the account check here (already resolved ones are skipped).
-                        let _ = self.account_checker_ctx.set(ctx.clone());
-                        for &player in self.detections.keys().filter(|&&p| p != 0) {
-                            let _ = self.account_checker_send.send(player);
-                        }
+                        self.queue_account_checks(ctx);
                         let now = chrono::Local::now().format("%H:%M:%S");
                         self.rt_status_message = if count > 0 {
                             if alerts_sent {
@@ -2806,6 +2967,8 @@ impl Gui {
                                 "use old replay conversion",
                                 "show strip demo button",
                                 "tf2 folder override",
+                                "steam api key",
+                                "recording date",
                                 "ui scale",
                                 "zoom",
                                 "custom colors",
@@ -2875,6 +3038,20 @@ impl Gui {
                                     });
                                 }
                             }
+                            // deleted account checks, recording date
+                            if let Some(Parameter::String(key)) = gen_params.get_mut(Self::STEAM_API_KEY) {
+                                if search_matches(&["steam api key", "recording date", "deleted accounts"]) {
+                                    #[cfg(feature = "experimental")]
+                                    const KEY_TOOLTIP: &str = "Used for the deleted account checks of flagged players (avoids the Steam community rate limit) and to look up items found during the match in the finders' backpacks, which dates a demo more precisely. Without a key the accounts are checked through their community profiles and the date comes from trade holds and item IDs only. Get a key at steamcommunity.com/dev/apikey.";
+                                    #[cfg(not(feature = "experimental"))]
+                                    const KEY_TOOLTIP: &str = "Used for the deleted account checks of flagged players, which avoids the Steam community rate limit. Without a key the accounts are checked through their community profiles. Get a key at steamcommunity.com/dev/apikey.";
+                                    ui.horizontal(|ui| {
+                                        ui.add(egui::TextEdit::singleline(key).password(true).desired_width(190.0).hint_text("Steam Web API key (optional)"))
+                                            .on_hover_text(KEY_TOOLTIP);
+                                        ui.label(setting_label(gs, Self::STEAM_API_KEY, "Steam API key"));
+                                    });
+                                }
+                            }
                             if let Some(Parameter::String(dir)) = gen_params.get_mut(Self::TF2_DIR_KEY) {
                                 if search_matches(&["tf2 folder override"]) {
                                     ui.horizontal(|ui| {
@@ -2907,6 +3084,10 @@ impl Gui {
                                             analysis_template::util::helpers::set_tf2_dir_override(Some(
                                                 std::path::PathBuf::from(dir.as_str()),
                                             ));
+                                            debug_log!(
+                                                "TF2 folder setting changed to {dir:?}, resolves to {:?}",
+                                                analysis_template::util::helpers::find_default_tf2_dir()
+                                            );
                                         }
                                     });
                                 }
@@ -3633,7 +3814,16 @@ impl Gui {
                 ui.add_space(4.0);
             }
             if let Some(p) = &self.file {
-                ui.heading(p.file_name().map(|n| n.to_string_lossy()).unwrap_or_default());
+                let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                // recording date: shown right-aligned on the file name row
+                let right_edge = ui.ctx().screen_rect().max.x - 8.0;
+                let width = (right_edge - ui.cursor().min.x).max(50.0);
+                ui.allocate_ui_with_layout(egui::vec2(width, 0.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    ui.heading(name);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        self.recording_date.show(ui);
+                    });
+                });
                 ui.label("Doubleclick steamid to open profile");
             }
             ui.separator();

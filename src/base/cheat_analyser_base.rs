@@ -37,12 +37,8 @@ use crate::lib::algorithm_costs;
 use crate::util::helpers::reconstruct_simtick;
 use crate::dev_print;
 
-/// Stores new algorithm detections, first forwarding the flagged players to the live
-/// detection listener (set by the GUI only).
+/// Stores new algorithm detections.
 fn record_detections(all: &mut Vec<Detection>, new: Vec<Detection>) {
-    if !new.is_empty() {
-        crate::notify_detections(&new);
-    }
     all.extend(new);
 }
 
