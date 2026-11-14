@@ -82,14 +82,14 @@ const MAX_BINOM: f64 = 300.0;
 static MODEL: OnceLock<Option<Model>> = OnceLock::new();
 
 /// Per-hit features. p0..p4 are consecutive updates, p2 the update with the largest impulse near the bullet.
-pub const SHOT_FEATURES: [&str; 65] = [
+pub const SHOT_FEATURES: [&str; 66] = [
     "impulse", "impulse0", "offset", "out", "back", "span", "exact_ret", "back_cos", "in_cos", "dev_lin", "seg",
     "pred_pre", "pred_post", "detour", "noise_med", "noise_p90", "noise_max", "ratio", "near_count", "v_pre", "v_post",
     "still_pre", "still_post", "gap_pre", "gap_post", "gap_med", "gap_max", "yaw_share", "pitch", "family", "precise",
     "on_ground", "ducking", "has_target", "headshot", "dist", "ang_size", "err_b", "err_b_hu", "k_b", "err_a_kb",
     "err_c_kb", "gain_a", "gain_c", "path_err", "path_hu", "gain_path", "dir_cos", "head_hu", "n_ok", "v_target",
     "k_off", "err_b_k0", "err_a_k0", "err_c_k0", "gain_k0", "near_ok", "path_near_ok", "k0", "path_kb", "b_off", "a_off",
-    "c_off", "path_off", "gain_rel",
+    "c_off", "path_off", "gain_rel", "held",
 ];
 const IDX_IMPULSE: usize = 0;
 const IDX_OFFSET: usize = 2;
@@ -111,6 +111,7 @@ const IDX_NEAR_OK: usize = 56;
 const IDX_PATH_NEAR_OK: usize = 57;
 const IDX_K0: usize = 58;
 const IDX_B_OFF: usize = 60;
+const IDX_HELD: usize = 65;
 
 /// Player features, see `unit_features`. scripts/ml_silent_aim_train.py has a copy (`unit_row`).
 pub const UNIT_FEATURES: [&str; 39] = [
@@ -392,6 +393,38 @@ fn triangle(u: &[Update], i: usize) -> Option<Triangle> {
     })
 }
 
+/// A held flick (the aim lands one update before the bullet and stays through it, e.g. the minigun) is two updates off
+/// the path; the two must be this close to each other, as a share of the out-and-back
+const HOLD_SHARE: f32 = 0.25;
+/// and the whole excursion (update before the hold to the one after) at most this many sim ticks. Slower held
+/// out-and-backs of 3-8 deg are ordinary close range tracking (scattergun, shotgun: 33% marked at any span, 80% at <= 4;
+/// one-update flicks are 83% marked, median span 3)
+const HOLD_MAX_SPAN: i64 = 4;
+
+/// The out-and-back of update `i`: a one-update flick, or a held flick with the other held update `j` left out, so it is
+/// measured from the update before the hold to the one after. The larger impulse wins; `Some(j)` for a held flick.
+fn excursion(u: &[Update], i: usize) -> Option<(Triangle, Option<usize>)> {
+    let mut best = triangle(u, i).map(|t| (t, None));
+    for j in [i.checked_sub(1), Some(i + 1)].into_iter().flatten() {
+        if j >= u.len() {
+            continue;
+        }
+        let lo = i.min(j).saturating_sub(2);
+        let hi = (i.max(j) + 2).min(u.len() - 1);
+        let local: Vec<Update> = (lo..=hi).filter(|&k| k != j).map(|k| u[k]).collect();
+        let Some(t) = triangle(&local, i - lo - usize::from(j < i)) else { continue };
+        let held = t.gap_pre + t.gap_post <= HOLD_MAX_SPAN && hypot(rel(&u[i], &u[j])) <= HOLD_SHARE * t.impulse;
+        if held && best.is_none_or(|(b, _)| t.impulse > b.impulse) {
+            best = Some((t, Some(j)));
+        }
+    }
+    best
+}
+
+fn impulse_of(u: &[Update], i: usize) -> f32 {
+    excursion(u, i).map_or(0.0, |(t, _)| t.impulse)
+}
+
 type V3 = [f64; 3];
 
 fn norm(a: V3) -> f64 {
@@ -459,49 +492,59 @@ fn quantile(values: &mut [f32], q: f64) -> f32 {
 }
 
 /// Index of the update on the bullet tick and of the one with the largest impulse near it
-fn shot_updates(u: &[Update], tick: u32) -> Option<(usize, usize)> {
+/// The update at the bullet and the one with the largest out-and-back near it, with its held partner (see `excursion`)
+fn shot_updates(u: &[Update], tick: u32) -> Option<(usize, usize, Option<usize>)> {
     let at = u.iter().rposition(|s| s.tick <= tick)?;
-    let mut best = at;
-    let mut best_impulse = triangle(u, at).map_or(0.0, |t| t.impulse);
+    let (mut best, mut best_impulse, mut held) = (at, 0.0, None);
+    if let Some((t, j)) = excursion(u, at) {
+        (best_impulse, held) = (t.impulse, j);
+    }
     for (i, s) in u.iter().enumerate() {
         if i != at && (i64::from(s.tick) - i64::from(tick)).abs() <= OFFSET_TICKS {
-            let impulse = triangle(u, i).map_or(0.0, |t| t.impulse);
-            if impulse > best_impulse {
-                best = i;
-                best_impulse = impulse;
+            if let Some((t, j)) = excursion(u, i).filter(|(t, _)| t.impulse > best_impulse) {
+                (best, best_impulse, held) = (i, t.impulse, j);
             }
         }
     }
-    Some((at, best))
+    Some((at, best, held))
 }
 
 /// Features of one hit that need no knowledge of the player's other hits; the rewind-relative ones are NaN until `finish`
 fn shot_features(u: &[Update], tick: u32, hit: Option<(&[Update], bool)>, family: u8, precise: bool) -> Option<([f32; SHOT_FEATURES.len()], Option<Curves>)> {
-    let (at, best) = shot_updates(u, tick)?;
-    let tri = triangle(u, best)?;
-    let impulse0 = triangle(u, at).map_or(0.0, |t| t.impulse);
+    let (at, best, held) = shot_updates(u, tick)?;
+    let (tri, _) = excursion(u, best)?;
+    let impulse0 = impulse_of(u, at);
     let cap = |v: f32| v.min(MAX_ANGLE);
 
     // the player's own impulses before the bullet, on the same measure
     let mut noise: Vec<f32> = (0..u.len())
         .filter(|&i| u[i].tick + 3 < tick && u[i].tick + PRE_TICKS >= tick)
-        .filter_map(|i| triangle(u, i).map(|t| t.impulse))
+        .filter_map(|i| excursion(u, i).map(|(t, _)| t.impulse))
         .collect();
     let noise_max = noise.iter().copied().fold(f32::NAN, f32::max);
     let noise_med = median(&mut noise);
     let noise_p90 = quantile(&mut noise, 0.9);
     let near_count = (0..u.len())
-        .filter(|&i| i != best && u[i].tick + 8 >= tick && u[i].tick <= tick + 8)
-        .filter_map(|i| triangle(u, i))
-        .filter(|t| t.impulse >= 0.5 * tri.impulse.max(0.35))
+        .filter(|&i| i != best && Some(i) != held && u[i].tick + 8 >= tick && u[i].tick <= tick + 8)
+        .filter_map(|i| excursion(u, i))
+        .filter(|(t, _)| t.impulse >= 0.5 * tri.impulse.max(0.35))
         .count();
     let mut gaps: Vec<f32> = u.windows(2).map(|w| gap_of(&w[0], &w[1]) as f32).collect();
     let gap_max = gaps.iter().copied().fold(0.0, f32::max);
     let gap_med = median(&mut gaps);
     let detour = (tri.out + tri.back) / tri.span.max(MIN_NOISE);
     let flag = |b: bool| if b { 1.0 } else { 0.0 };
-    let p2 = &u[best];
-    let (a, c) = (&u[best - 1], &u[best + 1]);
+    // a held flick: the path around it is the update before the hold and the one after
+    let held_path: Vec<Update>;
+    let (v, k) = match held {
+        Some(j) => {
+            held_path = u.iter().enumerate().filter(|&(n, _)| n != j).map(|(_, s)| *s).collect();
+            (&held_path[..], best - usize::from(j < best))
+        }
+        None => (u, best),
+    };
+    let p2 = &v[k];
+    let (a, c) = (&v[k - 1], &v[k + 1]);
 
     let mut f = [f32::NAN; SHOT_FEATURES.len()];
     f[..33].copy_from_slice(&[
@@ -540,6 +583,7 @@ fn shot_features(u: &[Update], tick: u32, hit: Option<(&[Update], bool)>, family
         flag(p2.ducking),
     ]);
     f[33] = 0.0;
+    f[IDX_HELD] = flag(held.is_some());
 
     let mut curves = None;
     if let Some((vic, headshot)) = hit {
@@ -866,7 +910,7 @@ impl MlSilentAim {
             .collect();
         let hurt = self.hurt_of(&shot);
         let Some(at) = u.iter().rposition(|s| s.tick <= shot.tick) else { return };
-        let impulse0 = triangle(&u, at).map_or(0.0, |t| t.impulse);
+        let impulse0 = impulse_of(&u, at);
         let counters = self.counters.entry(shot.player).or_default();
         counters.shots += 1;
         let (levels, total) = match hurt {
@@ -908,16 +952,17 @@ impl MlSilentAim {
         }
     }
 
-    /// Counts the impulse of the update before the newest one, unless a bullet is close to it
+    /// Counts the impulse of the update two before the newest one (a held flick needs the update after the hold),
+    /// unless a bullet is close to it
     fn count_base(&mut self, sid: u64) {
         let Some(h) = self.history.get(&sid) else { return };
         let n = h.len();
-        if n < 4 {
+        if n < 6 {
             return;
         }
-        let u: Vec<Update> = h.range(n - 4..).copied().collect();
-        let Some(t) = triangle(&u, 2) else { return };
-        let tick = u[2].tick;
+        let u: Vec<Update> = h.range(n - 6..).copied().collect();
+        let Some((t, _)) = excursion(&u, 3) else { return };
+        let tick = u[3].tick;
         if self.fires.get(&sid).is_some_and(|f| f.iter().any(|&b| b + OFFSET_TICKS as u32 >= tick && b <= tick + OFFSET_TICKS as u32)) {
             return;
         }
@@ -1140,6 +1185,7 @@ impl<'a> CheatAlgorithm<'a> for MlSilentAim {
                         "typical_rewind_ticks": f[IDX_K0],
                         "backtrack_flick": f[IDX_NEAR_OK] == 0.0 && f[IDX_PATH_NEAR_OK] == 0.0 && f[IDX_K_OFF].abs() >= 3.0,
                         "jitter_ratio": round(f[IDX_RATIO]),
+                        "held_flick": f[IDX_HELD] == 1.0,
                     }),
                 });
             }
@@ -1187,6 +1233,29 @@ mod tests {
         let u = path(&[(10.0, 0.0), (11.0, 0.0), (12.0, 2.0), (13.0, 0.0), (14.0, 0.0)]);
         let t = triangle(&u, 2).unwrap();
         assert!(t.impulse > 1.9 && t.impulse < 2.1, "{t:?}");
+    }
+
+    #[test]
+    fn held_flick_is_measured_around_the_hold() {
+        let u = path(&[(10.0, 0.0), (10.0, 0.0), (30.0, 0.0), (30.2, 0.0), (10.0, 0.0), (10.0, 0.0)]);
+        assert!(triangle(&u, 2).unwrap().impulse < 0.5);
+        let (t, held) = excursion(&u, 2).unwrap();
+        assert_eq!(held, Some(3));
+        assert!((t.impulse - 20.0).abs() < 0.01, "{t:?}");
+        let (t, held) = excursion(&u, 3).unwrap();
+        assert_eq!(held, Some(2));
+        assert!(t.impulse > 19.0, "{t:?}");
+    }
+
+    #[test]
+    fn held_snap_and_sweep_have_no_held_impulse() {
+        let snap = path(&[(10.0, 0.0), (10.0, 0.0), (30.0, 0.0), (30.0, 0.0), (30.0, 0.0), (30.0, 0.0)]);
+        let sweep = path(&[(10.0, 0.0), (11.0, 0.0), (12.0, 0.0), (13.0, 0.0), (14.0, 0.0), (15.0, 0.0)]);
+        for u in [snap, sweep] {
+            for i in 0..u.len() {
+                assert!(impulse_of(&u, i) < 0.01, "{i}");
+            }
+        }
     }
 
     #[test]

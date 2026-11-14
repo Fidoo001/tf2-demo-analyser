@@ -12,6 +12,7 @@ use analysis_template::{
         parameters::{strip_session_only_parameters, Parameter, Parameters},
     },
     playerlist_view::parse_playerlist,
+    recorder_view::parse_recorder,
     util::helpers::{
         convert_demo_to_replay, convert_demo_to_replay_with_takes, find_default_tf2_dir,
         format_sus_demo_filename, strip_consolecmds_from_bytes,
@@ -1301,6 +1302,11 @@ fn main() -> Result<(), Error> {
         "chat",
         "parse and display all and team chat messages",
     );
+    opts.optflag(
+        "",
+        "recorder",
+        "print the demo recorder's name and SteamID64 as JSON (identified by its own client slot; steam_id is null for SourceTV or a missing userinfo)",
+    );
     opts.optmulti("a", "algorithm", "specify the algorithm to run. Include multiple -a flags to run multiple algorithms. If not specified, the default algorithms are run.", "ALGORITHM [-a ALGORITHM]...");
     opts.optflag("c", "count", "only print the number of detections");
     opts.optflag("h", "help", "print this help menu");
@@ -1708,6 +1714,15 @@ fn main() -> Result<(), Error> {
         let raw = fs::read(&demo_path)?;
         (raw, demo_path.clone())
     };
+
+    // Recorder: the recording client's own slot from SVC_ServerInfo (not the header nick)
+    if matches.opt_present("recorder") {
+        let recorder = parse_recorder(&target_demo_path)?;
+        println!("{}", if silent && !pretty { serde_json::to_string(&recorder)? } else { serde_json::to_string_pretty(&recorder)? });
+        if !matches.opt_present("H") && !matches.opt_present("P") && !matches.opt_present("C") && !matches.opt_present("a") {
+            return Ok(());
+        }
+    }
 
     // Feature 1: Header CLI
     if matches.opt_present("H") {

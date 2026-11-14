@@ -7,6 +7,7 @@ pub mod base {
 pub mod header_view;
 pub mod playerlist_view;
 pub mod chat_view;
+pub mod recorder_view;
 #[cfg(feature = "rcon")]
 pub mod rcon;
 #[cfg(feature = "tf2bd")]
