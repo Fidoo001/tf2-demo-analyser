@@ -571,9 +571,46 @@ fn analyse_bulk_scan_demo(
     })
 }
 
+/// Writes the flagged demos of a bulk scan without moving to `bulk_scan_flagged_<date>.txt` next to
+/// the analyser. The header holds the scan date, the enabled algorithms and the demo folder;
+/// every following line is "<demo name> - <flag count>". Returns the written path.
+fn write_flagged_report(
+    job: &BulkScanJob,
+    flagged: &[(String, usize)],
+    scan_start: chrono::DateTime<chrono::Local>,
+    cancelled: bool,
+) -> Result<std::path::PathBuf, String> {
+    let dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+        .ok_or_else(|| "cannot locate the analyser's directory".to_string())?;
+    let path = dir.join(format!("bulk_scan_flagged_{}.txt", scan_start.format("%Y-%m-%d_%H-%M-%S")));
+    let algorithms = job
+        .algos
+        .iter()
+        .filter(|(_, enabled)| **enabled)
+        .map(|(name, _)| name.as_str())
+        .sorted()
+        .join(", ");
+    let mut out = String::new();
+    out.push_str(&format!("Scan date: {}\n", scan_start.format("%Y-%m-%d %H:%M:%S")));
+    out.push_str(&format!("Enabled algorithms: {algorithms}\n"));
+    out.push_str(&format!("Demo folder: {}\n", job.dir.display()));
+    if cancelled {
+        out.push_str("Scan was cancelled, the list is incomplete\n");
+    }
+    out.push('\n');
+    for (name, count) in flagged.iter().sorted_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0))) {
+        out.push_str(&format!("{name} - {count}\n"));
+    }
+    std::fs::write(&path, out).map_err(|e| format!("cannot write '{}': {e}", path.display()))?;
+    Ok(path)
+}
+
 /// Bulk scans the demos directly in `job.dir` like the CLI's `--bulk`: several demos are analysed
-/// at once (one thread each), and each demo is moved into `sus/` (renamed with its detection
-/// count) or `clean/`. Detections on marked cheaters and deleted accounts can be ignored.
+/// at once (one thread each). With `move_demos`, each demo is moved into `sus/` or `clean/`;
+/// otherwise the flagged demos are listed in a text file. Detections on marked cheaters and
+/// deleted accounts can be ignored.
 fn run_bulk_scan(job: BulkScanJob, progress: std::sync::Arc<BulkScanProgress>, ctx: egui::Context) {
     use std::sync::atomic::Ordering;
     let finish = |error: Option<String>| {
@@ -623,6 +660,9 @@ fn run_bulk_scan(job: BulkScanJob, progress: std::sync::Arc<BulkScanProgress>, c
     // The per-demo analyser output would interleave between the demos analysed at the same time
     let was_silent = analysis_template::SILENT.swap(true, Ordering::Relaxed);
     let next_demo = std::sync::atomic::AtomicUsize::new(0);
+    let scan_start = chrono::Local::now();
+    // (demo name, flag count) of every flagged demo when the demos are not moved
+    let mut flagged_demos: Vec<(String, usize)> = Vec::new();
 
     let mut lookups = BulkAccountLookups {
         accounts: job.known_accounts.clone(),
@@ -700,20 +740,22 @@ fn run_bulk_scan(job: BulkScanJob, progress: std::sync::Arc<BulkScanProgress>, c
                     if progress.cancel.load(Ordering::Relaxed) {
                         continue;
                     }
-                    let dest = if !job.move_demos {
-                        path.clone()
-                    } else if qualifying > 0 {
-                        sus_dir.join(analysis_template::util::helpers::format_sus_demo_filename(&name, qualifying))
-                    } else {
-                        clean_dir.join(&name)
-                    };
-                    // Moving a demo onto itself does nothing, so unmoved demos are only counted
-                    match move_demo_file(path, &dest) {
-                        Ok(()) if qualifying > 0 => {
+                    if !job.move_demos {
+                        // Demos stay where they are; flagged ones are listed in the report file
+                        if qualifying > 0 {
                             progress.flagged.fetch_add(1, Ordering::Relaxed);
+                            flagged_demos.push((name.clone(), qualifying));
                         }
-                        Ok(()) => {}
-                        Err(e) => add_failure(&name, format!("failed to move to '{}': {e}", dest.display())),
+                    } else {
+                        // The demo keeps its name, only the folder tells whether it was flagged
+                        let dest = if qualifying > 0 { sus_dir.join(&name) } else { clean_dir.join(&name) };
+                        match move_demo_file(path, &dest) {
+                            Ok(()) if qualifying > 0 => {
+                                progress.flagged.fetch_add(1, Ordering::Relaxed);
+                            }
+                            Ok(()) => {}
+                            Err(e) => add_failure(&name, format!("failed to move to '{}': {e}", dest.display())),
+                        }
                     }
                 }
                 Err(e) => add_failure(&name, e),
@@ -724,9 +766,20 @@ fn run_bulk_scan(job: BulkScanJob, progress: std::sync::Arc<BulkScanProgress>, c
     });
 
     analysis_template::SILENT.store(was_silent, Ordering::Relaxed);
-    if progress.cancel.load(Ordering::Relaxed) {
+    let cancelled = progress.cancel.load(Ordering::Relaxed);
+    if cancelled {
         // The cancellation belongs to the bulk scan, later analyses must not abort because of it
         analysis_template::CANCEL_ANALYSIS.store(false, Ordering::Relaxed);
+    }
+    if !job.move_demos {
+        if let Err(e) = write_flagged_report(&job, &flagged_demos, scan_start, cancelled) {
+            progress
+                .failures
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(format!("flagged demo list: {e}"));
+            progress.failed.fetch_add(1, Ordering::Relaxed);
+        }
     }
     finish(None);
 }
@@ -2426,7 +2479,7 @@ impl Gui {
                 ui.checkbox(&mut bulk.ignore_marked, "Ignore marked cheaters")
                     .on_hover_text("Detections on players already in reported_ids.txt do not flag a demo");
                 ui.checkbox(&mut bulk.move_demos, "Move demos")
-                    .on_hover_text("Move each demo into the 'sus' (renamed with its detection count) or 'clean' subfolder. When off, demos are only counted and stay where they are.");
+                    .on_hover_text("Move each demo into the 'sus' or 'clean' subfolder. When off, demos stay where they are and the flagged ones are saved with their flag count to a text file next to the analyser.");
                 ui.checkbox(&mut bulk.valve_only, "Valve servers only")
                     .on_hover_text("Demos from non-Valve servers are not analysed and count as clean");
                 ui.horizontal(|ui| {
