@@ -140,7 +140,7 @@ dependencies = [
 
 [[package]]
 name = "analysis-template"
-version = "1.7.0"
+version = "1.7.1"
 dependencies = [
  "anyhow",
  "bitbuffer",

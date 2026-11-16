@@ -32,9 +32,17 @@ use crate::util::nocrex::jankguard::JankGuard;
 /// Attacker samples kept before / after the hit tick
 const WINDOW_BEFORE: u32 = 66;
 const WINDOW_AFTER: u32 = 16;
+/// Samples before the hit searched for the acquisition (how the aim got onto the target). Aimbots that wait for a
+/// headshot or for charge (Amalgam `ShouldFire`) snap on and hold the target, often more than a second before the hit.
+const ACQ_WINDOW_BEFORE: u32 = 198;
 /// Largest lag compensation offset tried, in ticks
 const MAX_LAG: usize = 24;
-const HISTORY_TICKS: u32 = WINDOW_BEFORE + MAX_LAG as u32 + WINDOW_AFTER + 8;
+const HISTORY_TICKS: u32 = ACQ_WINDOW_BEFORE + MAX_LAG as u32 + WINDOW_AFTER + 8;
+/// The error before the acquiring update is the largest one in this many ticks before it (a snap over two updates)
+const ACQ_FROM_TICKS: i64 = 8;
+/// The hold only ends where the error leaves this multiple of the on-target limit, so a tracking wobble just outside
+/// the limit is not taken for the acquisition
+const ACQ_EXIT: f64 = 2.5;
 /// Hits of one attacker closer than this are merged into the first one (pellets, sprays)
 const MIN_HIT_SPACING: u32 = 8;
 const MIN_WINDOW_SAMPLES: usize = 8;
@@ -54,20 +62,27 @@ const FL_DUCKING: u32 = 1 << 1;
 static MODEL: OnceLock<Option<Model>> = OnceLock::new();
 
 /// Per-hit features, in the order of `HIT_FEATURES`
-pub const HIT_FEATURES: [&str; 31] = [
+pub const HIT_FEATURES: [&str; 38] = [
     "err0", "err0_rel", "err0_hu", "err_m1", "err_m2", "err_m4", "err_m8", "err_p1", "err_p2", "err_p3",
     "best_lag_gain", "step_hit", "pre_med", "stillness", "max_step_10", "post_step", "post_ratio", "t_on",
     "pre_err_max", "jerk", "trk_resid", "trk_tgt", "trk_ratio", "appr_len", "appr_drop", "appr_ratio_med",
-    "appr_ratio_mad", "appr_mono", "appr_step_cv", "dist", "lag",
+    "appr_ratio_mad", "appr_mono", "appr_step_cv", "acq_from", "acq_step", "acq_frac", "acq_land_rel", "acq_t",
+    "hold_err_rel", "hold_resid", "dist", "lag",
 ];
+/// Hit features measured on the near-hit window (`WINDOW_BEFORE`)
+const NEAR: usize = 29;
+/// Acquisition features (`acquisition_features`, on `ACQ_WINDOW_BEFORE`)
+const ACQ: usize = 7;
 /// Hit features that are aggregated into the player features (all but the context `dist` and `lag`)
-const AGGREGATED: usize = 29;
+const AGGREGATED: usize = NEAR + ACQ;
 const IDX_ERR0_REL: usize = 1;
 const IDX_STEP_HIT: usize = 11;
 const IDX_STILLNESS: usize = 13;
 const IDX_JERK: usize = 19;
-const IDX_DIST: usize = 29;
-const IDX_LAG: usize = 30;
+const IDX_ACQ_STEP: usize = 30;
+const IDX_ACQ_T: usize = 33;
+const IDX_DIST: usize = AGGREGATED;
+const IDX_LAG: usize = AGGREGATED + 1;
 
 /// Player feature names: `<hit feature>_med`, `_p10`, `_p90` for the aggregated hit features, then the
 /// snap and precise shares
@@ -269,9 +284,28 @@ fn median(values: &[f64]) -> f64 {
     quantile(&mut values.to_vec(), 0.5)
 }
 
-/// Features of one hit from the attacker's eye samples and the victim's position samples, or `None`
-/// when the window is unusable. The attacker samples are ordered by tick, `hit_tick` is the hurt tick.
-fn hit_features(att: &[Sample], vic: &[Sample], hit_tick: u32) -> Option<[f32; HIT_FEATURES.len()]> {
+/// Aim error (degrees) from `eye` along `d` to the victim's body column at `v`, and the aimed point relative to the eye
+fn column_error(eye: V3, d: V3, v: &Sample) -> (f64, V3) {
+    let vpos = v.pos.map(f64::from);
+    let top = if v.ducking { BODY_TOP_DUCKING } else { BODY_TOP_STANDING } as f64;
+    let rel = sub(vpos, eye);
+    let dh = (rel[0] * rel[0] + rel[1] * rel[1]).sqrt();
+    let dxy = (d[0] * d[0] + d[1] * d[1]).sqrt().max(1e-6);
+    let aim_z = eye[2] + d[2] / dxy * dh;
+    let tz = aim_z.clamp(vpos[2] + f64::from(BODY_BOTTOM), vpos[2] + top);
+    let t = [vpos[0] - eye[0], vpos[1] - eye[1], tz - eye[2]];
+    (angle_between(d, t), t)
+}
+
+/// The victim sample at `q` ticks relative to the hit (the last one at or before it)
+fn victim_at<'v>(vic: &'v [Sample], vdt: &[i64], q: i64) -> &'v Sample {
+    &vic[vdt.partition_point(|&t| t <= q).saturating_sub(1)]
+}
+
+/// Near-hit features of one hit (the first `NEAR` of `HIT_FEATURES`, then `dist` and `lag`) from the attacker's eye
+/// samples and the victim's position samples, or `None` when the window is unusable. The attacker samples are ordered
+/// by tick, `hit_tick` is the hurt tick.
+fn hit_features(att: &[Sample], vic: &[Sample], hit_tick: u32) -> Option<[f32; NEAR + 2]> {
     let n = att.len();
     let adt: Vec<i64> = att.iter().map(|s| i64::from(s.tick) - i64::from(hit_tick)).collect();
     let h = adt.iter().rposition(|&t| t <= 0)?;
@@ -287,19 +321,8 @@ fn hit_features(att: &[Sample], vic: &[Sample], hit_tick: u32) -> Option<[f32; H
     let mut tgt = vec![vec![[0.0f64; 3]; n]; MAX_LAG + 1];
     for lag in 0..=MAX_LAG {
         for i in 0..n {
-            let q = adt[i] - lag as i64;
-            let vi = vdt.partition_point(|&t| t <= q).saturating_sub(1);
-            let v = &vic[vi];
-            let vpos = v.pos.map(f64::from);
-            let top = if v.ducking { BODY_TOP_DUCKING } else { BODY_TOP_STANDING } as f64;
-            let rel = sub(vpos, eyes[i]);
-            let dh = (rel[0] * rel[0] + rel[1] * rel[1]).sqrt();
-            let d = dirs[i];
-            let dxy = (d[0] * d[0] + d[1] * d[1]).sqrt().max(1e-6);
-            let aim_z = eyes[i][2] + d[2] / dxy * dh;
-            let tz = aim_z.clamp(vpos[2] + f64::from(BODY_BOTTOM), vpos[2] + top);
-            let t = [vpos[0] - eyes[i][0], vpos[1] - eyes[i][1], tz - eyes[i][2]];
-            err[lag][i] = angle_between(d, t);
+            let (e, t) = column_error(eyes[i], dirs[i], victim_at(vic, &vdt, adt[i] - lag as i64));
+            err[lag][i] = e;
             tgt[lag][i] = t;
         }
     }
@@ -407,6 +430,66 @@ fn hit_features(att: &[Sample], vic: &[Sample], hit_tick: u32) -> Option<[f32; H
     Some(f.map(|x| x as f32))
 }
 
+/// How the aim got onto the target, in the order of `HIT_FEATURES[NEAR..AGGREGATED]`, on the long window at the hit's
+/// lag `k`. The hold is the last run of samples within `ACQ_EXIT` times the on-target limit (`max(ang_size, 1°)`) that
+/// lasts until the hit; the acquisition is its first sample on the target, the acquiring update the step into it. All
+/// NaN when the aim is not on target at the hit, or already held at the start of the window.
+/// - `acq_from`: the largest error in the `ACQ_FROM_TICKS` before the acquisition (the approach starts there)
+/// - `acq_step`: the largest view step of one update in the approach, degrees per tick
+/// - `acq_frac`: the largest share of `acq_from` that one update of the approach removed (an aimbot snap: ~1)
+/// - `acq_land_rel`: error right after it, in units of the target's angular size
+/// - `acq_t`: ticks from the acquisition to the hit
+/// - `hold_err_rel`: median error from the acquisition to the hit, in units of the target's angular size
+/// - `hold_resid`: median view motion not explained by the target's motion during the hold, degrees per tick
+fn acquisition_features(att: &[Sample], vic: &[Sample], hit_tick: u32, k: usize, ang_size: f64) -> [f32; ACQ] {
+    let nan = [f32::NAN; ACQ];
+    let adt: Vec<i64> = att.iter().map(|s| i64::from(s.tick) - i64::from(hit_tick)).collect();
+    let Some(h) = adt.iter().rposition(|&t| t <= 0) else { return nan };
+    if vic.is_empty() {
+        return nan;
+    }
+    let vdt: Vec<i64> = vic.iter().map(|s| i64::from(s.tick) - i64::from(hit_tick)).collect();
+    let dirs: Vec<V3> = att.iter().map(|s| view_dir(s.yaw, s.pitch)).collect();
+    let (e, tgt): (Vec<f64>, Vec<V3>) =
+        (0..=h).map(|i| column_error(att[i].eye.map(f64::from), dirs[i], victim_at(vic, &vdt, adt[i] - k as i64))).unzip();
+    let on_limit = ang_size.max(1.0);
+    if e[h] > on_limit {
+        return nan;
+    }
+    let Some(left) = (0..h).rev().find(|&i| e[i] > ACQ_EXIT * on_limit) else { return nan };
+    let Some(acq) = (left + 1..=h).find(|&i| e[i] <= on_limit) else { return nan };
+    // the approach: from the (first) largest error in the ticks before the acquisition to it
+    let a0 = (0..acq).find(|&i| adt[i] >= adt[acq] - ACQ_FROM_TICKS).unwrap_or(acq - 1);
+    let j = (a0..acq).fold(acq - 1, |b, i| if e[i] > e[b] || (e[i] == e[b] && i < b) { i } else { b });
+    let from = e[j];
+    let (mut step, mut frac) = (0.0f64, 0.0f64);
+    for i in j..acq {
+        let gap = (adt[i + 1] - adt[i]).max(1) as f64;
+        step = step.max(angle_between(dirs[i + 1], dirs[i]) / gap);
+        frac = frac.max((e[i] - e[i + 1]) / from.max(1e-6));
+    }
+    let unit = |t: V3| {
+        let l = norm(t).max(1e-9);
+        [t[0] / l, t[1] / l, t[2] / l]
+    };
+    let resid: Vec<f64> = (acq..h)
+        .map(|i| {
+            let g = (adt[i + 1] - adt[i]).max(1) as f64;
+            norm(sub(sub(dirs[i + 1], dirs[i]), sub(unit(tgt[i + 1]), unit(tgt[i])))).to_degrees() / g
+        })
+        .collect();
+    let f = [
+        from,
+        step,
+        frac,
+        e[acq] / ang_size,
+        (adt[h] - adt[acq]) as f64,
+        median(&e[acq..=h]) / ang_size,
+        if resid.is_empty() { f64::NAN } else { median(&resid) },
+    ];
+    f.map(|x| x as f32)
+}
+
 /// Player features from the player's hit features (see `unit_feature_names`)
 fn unit_features(hits: &[&HitRecord]) -> Vec<f32> {
     let mut out = Vec::with_capacity(AGGREGATED * 3 + 2);
@@ -483,7 +566,20 @@ impl MlAimbot {
                 continue;
             }
             let vic: Vec<Sample> = v.iter().filter(|s| s.tick + MAX_LAG as u32 >= lo && s.tick <= hi).copied().collect();
-            if let Some(features) = hit_features(&att, &vic, hit.tick) {
+            if let Some(near) = hit_features(&att, &vic, hit.tick) {
+                // the acquisition window starts after the attacker's spawn or teleport
+                let acq_lo = hit.tick.saturating_sub(ACQ_WINDOW_BEFORE.min(hit.since_spawn));
+                let att_long: Vec<Sample> = a.iter().filter(|s| s.tick >= acq_lo && s.tick <= hi).copied().collect();
+                let vic_long: Vec<Sample> =
+                    v.iter().filter(|s| s.tick + MAX_LAG as u32 >= acq_lo && s.tick <= hi).copied().collect();
+                let k = near[NEAR + 1] as usize;
+                let ang_size = f64::from(BODY_HALF_WIDTH).atan2(f64::from(near[NEAR])).to_degrees();
+                let acq = acquisition_features(&att_long, &vic_long, hit.tick, k, ang_size);
+                let mut features = [f32::NAN; HIT_FEATURES.len()];
+                features[..NEAR].copy_from_slice(&near[..NEAR]);
+                features[NEAR..AGGREGATED].copy_from_slice(&acq);
+                features[IDX_DIST] = near[NEAR];
+                features[IDX_LAG] = near[NEAR + 1];
                 self.hits.push(HitRecord {
                     tick: hit.tick,
                     attacker: hit.attacker,
@@ -503,7 +599,7 @@ impl<'a> CheatAlgorithm<'a> for MlAimbot {
     }
 
     fn tooltip(&self) -> &'static str {
-        "Scores each player's hitscan hits over the whole demo with a learned model (snaps, jerk, stillness, tracking) and marks the most aimbot-like hits of high-scoring players."
+        "Scores each player's hitscan hits over the whole demo with a learned model (snaps, jerk, stillness, tracking, and how the aim got onto the target in the last 3 s, for aimbots that wait for a headshot or charge) and marks the most aimbot-like hits of high-scoring players."
     }
 
     // Never hidden by the global sliding window: aggregates its evidence per player over the whole demo
@@ -636,10 +732,56 @@ impl<'a> CheatAlgorithm<'a> for MlAimbot {
                         "stillness": f[IDX_STILLNESS],
                         "jerk_deg": f[IDX_JERK],
                         "lag_ticks": f[IDX_LAG],
+                        "acquire_deg_per_tick": f[IDX_ACQ_STEP],
+                        "acquired_ticks_before_hit": f[IDX_ACQ_T],
                     }),
                 });
             }
         }
         Ok(detections)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample(tick: u32, yaw: f32) -> Sample {
+        Sample { tick, pos: [0.0, 0.0, 0.0], eye: [0.0, 0.0, 68.0], yaw, pitch: 0.0, ducking: false }
+    }
+
+    fn victim(tick: u32) -> Sample {
+        Sample { tick, pos: [1000.0, 0.0, 0.0], eye: [1000.0, 0.0, 68.0], yaw: 0.0, pitch: 0.0, ducking: false }
+    }
+
+    #[test]
+    fn snap_and_hold_is_one_acquiring_update() {
+        // 10 deg off a still target, one-update snap onto it at tick 60, held until the hit at tick 100
+        let att: Vec<Sample> = (0..=100).map(|t| sample(t, if t < 60 { 10.0 } else { 0.0 })).collect();
+        let vic: Vec<Sample> = (0..=100).map(victim).collect();
+        let ang = f64::from(BODY_HALF_WIDTH).atan2(1000.0).to_degrees();
+        let f = acquisition_features(&att, &vic, 100, 0, ang);
+        assert!((f[0] - 10.0).abs() < 0.01, "{f:?}");
+        assert!((f[1] - 10.0).abs() < 0.01, "{f:?}");
+        assert!(f[2] > 0.99, "{f:?}");
+        assert!(f[3] < 0.01, "{f:?}");
+        assert_eq!(f[4], 40.0);
+        assert!(f[5] < 0.01 && f[6] < 0.01, "{f:?}");
+    }
+
+    #[test]
+    fn already_held_target_has_no_acquisition() {
+        let att: Vec<Sample> = (0..=100).map(|t| sample(t, 0.2)).collect();
+        let vic: Vec<Sample> = (0..=100).map(victim).collect();
+        assert!(acquisition_features(&att, &vic, 100, 0, 1.37).iter().all(|v| v.is_nan()));
+    }
+
+    #[test]
+    fn wobble_just_outside_the_target_does_not_end_the_hold() {
+        // snap at tick 30, then one sample 1.5x the limit off at tick 70: the hold continues
+        let att: Vec<Sample> = (0..=100).map(|t| sample(t, if t < 30 { 12.0 } else if t == 70 { 2.0 } else { 0.0 })).collect();
+        let vic: Vec<Sample> = (0..=100).map(victim).collect();
+        let ang = f64::from(BODY_HALF_WIDTH).atan2(1000.0).to_degrees();
+        assert_eq!(acquisition_features(&att, &vic, 100, 0, ang)[4], 70.0);
     }
 }
