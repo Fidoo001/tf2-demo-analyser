@@ -454,6 +454,9 @@ pub struct PacketInfo {
     /// Bits left in the payload after the last message (0..=6) and their value.
     pub tail_bits: u8,
     pub tail_value: u8,
+    /// The recording client's real engine view (pitch, yaw) from the packet's command info. The usercmd
+    /// angles can differ from it (silent aim writes them only on the shot cmd).
+    pub client_view_angles: [f32; 2],
 }
 
 #[derive(Serialize, Deserialize, Clone)]

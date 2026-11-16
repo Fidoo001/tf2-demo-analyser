@@ -9,6 +9,10 @@
 //!   their buildings are not flagged however long they look at them.
 //! - **silent**: a single eye angle sample lands on the building centre (yaw and pitch) while the
 //!   samples before and after point elsewhere and agree with each other (silent aim out-and-back).
+//!   `silent_yaw` is the same with only the yaw (sapper), `silent_box` lands inside the building's
+//!   angular box from range (coarse eye angles).
+//! - **snap_yaw**: with a sapper out, one step of several degrees onto the centre bearing where the
+//!   view then stays (snapping between buildings without holding a lock or returning).
 
 use anyhow::Error;
 use serde_json::json;
@@ -42,6 +46,15 @@ const MAX_EYE_STEP: f32 = 120.0;
 const SILENT_DEDUPE: u32 = 16;
 /// Beyond this a silent event needs a hitscan weapon
 const MELEE_SILENT_DIST: f32 = 200.0;
+/// Snaps closer together than this are one snap (alternating silent samples)
+const SNAP_DEDUPE: u32 = 4;
+/// snap_yaw: the sample after the landing stays this close to the centre bearing
+const SNAP_STAY: f32 = 1.0;
+/// silent_box: margins for the networked eye angle resolution (~0.35° yaw, ~0.7° pitch)
+const BOX_YAW_MARGIN: f32 = 0.5;
+const BOX_PITCH_MARGIN: f32 = 1.0;
+/// Closer than this a building's box is too large for landing in it to mean anything
+const MIN_BOX_DIST: f32 = 300.0;
 
 fn is_sapper(weapon: &str) -> bool {
     let w = weapon.to_lowercase();
@@ -154,6 +167,9 @@ impl BuildingAimbot {
                 ("min_silent_flick".to_string(), Parameter::Float(1.5)),
                 ("min_silent".to_string(), Parameter::Int(2)),
                 ("min_silent_yaw".to_string(), Parameter::Int(2)),
+                ("min_snap_step".to_string(), Parameter::Float(5.0)),
+                ("min_snap_yaw".to_string(), Parameter::Int(3)),
+                ("min_silent_box".to_string(), Parameter::Int(4)),
                 ("max_detections".to_string(), Parameter::Int(5)),
             ]),
             jg: JankGuard::default(),
@@ -245,6 +261,7 @@ impl<'a> CheatAlgorithm<'a> for BuildingAimbot {
         let min_sweep = get_parameter_value::<f32>(&self.params, "min_lock_sweep");
         let silent_tol = get_parameter_value::<f32>(&self.params, "silent_tolerance");
         let min_flick = get_parameter_value::<f32>(&self.params, "min_silent_flick");
+        let min_snap_step = get_parameter_value::<f32>(&self.params, "min_snap_step");
         let lock_cfg = (min_samples, min_sweep, get_parameter_value::<f32>(&self.params, "min_yaw_lock_sweep"), get_parameter_value::<f32>(&self.params, "lock_pitch_tolerance"));
         let tick = u32::from(state.tick);
         if state.buildings.is_empty() {
@@ -289,7 +306,7 @@ impl<'a> CheatAlgorithm<'a> for BuildingAimbot {
                     continue;
                 }
                 let own = b.builder_entity_index() == u32::from(p.entity);
-                let (ty, cz, _half_w, _half_h) = building_box(b);
+                let (ty, cz, half_w, half_h) = building_box(b);
                 let bp = b.position();
                 let c = [bp.x, bp.y, bp.z + cz];
                 let (dx, dy, dz) = (c[0] - eye[0], c[1] - eye[1], c[2] - eye[2]);
@@ -315,10 +332,20 @@ impl<'a> CheatAlgorithm<'a> for BuildingAimbot {
                     let a_yaw_err = wrap(a.yaw - to_c[1].atan2(to_c[0]).to_degrees()).abs();
                     let enemy = b.team() != p.team;
                     let dist_b = norm3(to_c);
+                    // inside the box's angular extent (plus the networked angle resolution)
+                    let in_box = |s: &Sample| {
+                        let to = [c[0] - s.eye[0], c[1] - s.eye[1], c[2] - s.eye[2]];
+                        let h = to[0].hypot(to[1]);
+                        let ye = wrap(s.yaw - to[1].atan2(to[0]).to_degrees()).abs();
+                        let pe = (s.pitch + to[2].atan2(h).to_degrees()).abs();
+                        ye <= half_w.atan2(h).to_degrees() + BOX_YAW_MARGIN && pe <= half_h.atan2(h).to_degrees() + BOX_PITCH_MARGIN
+                    };
                     let kind = if err <= silent_tol && a_err > flick * 0.5 && enemy {
                         Some("silent")
                     } else if b_yaw_err <= yaw_tol && a_yaw_err > flick * 0.5 {
                         Some("silent_yaw")
+                    } else if enemy && dist_b >= MIN_BOX_DIST && in_box(&bs) && !in_box(&a) && !in_box(&cur) {
+                        Some("silent_box")
                     } else {
                         None
                     };
@@ -328,11 +355,13 @@ impl<'a> CheatAlgorithm<'a> for BuildingAimbot {
                     let kind = match (kind, w.as_deref()) {
                         (Some("silent"), Some(w)) if dist_b <= MELEE_SILENT_DIST || is_hitscan(w) => Some("silent"),
                         (Some("silent_yaw"), Some(w)) if is_sapper(w) => Some("silent_yaw"),
+                        (Some("silent_box"), Some(w)) if is_hitscan(w) => Some("silent_box"),
                         _ => None,
                     };
-                    // one flick across several samples counts once
+                    // one flick across several samples counts once; box shots follow the fire rate
                     let repeat = kind.is_some_and(|k| {
-                        pd.events.iter().rev().take(8).any(|e| e.kind == k && bs.tick - e.tick <= SILENT_DEDUPE)
+                        let dedupe = if k == "silent_box" { SNAP_DEDUPE } else { SILENT_DEDUPE };
+                        pd.events.iter().rev().take(8).any(|e| e.kind == k && bs.tick - e.tick <= dedupe)
                     });
                     if let (Some(kind), Some(w), false) = (kind, w, repeat) {
                         pd.events.push(Event {
@@ -353,6 +382,42 @@ impl<'a> CheatAlgorithm<'a> for BuildingAimbot {
                                 "distance": dist_b.round(),
                             }),
                         });
+                    }
+                }
+
+                // snap_yaw: the previous sample stepped from well off the centre bearing straight onto
+                // it, and the view stays there (a fast turn passing through the bearing does not)
+                let snap = match pd.prev {
+                    [Some(bs), Some(a)] if cur.tick - bs.tick <= SILENT_GAP && bs.tick - a.tick <= SILENT_GAP && b.team() != p.team => {
+                        let yaw_to = |s: &Sample| wrap(s.yaw - (c[1] - s.eye[1]).atan2(c[0] - s.eye[0]).to_degrees()).abs();
+                        let (step, landed) = (yaw_to(&a), yaw_to(&bs));
+                        (landed <= yaw_tol && step >= min_snap_step && yaw_err.abs() <= SNAP_STAY).then_some((bs, step, landed))
+                    }
+                    _ => None,
+                };
+                if let Some((bs, step, landed)) = snap {
+                    {
+                        let w = weapon.get_or_insert_with(|| state.get_player_weapon(p)).clone();
+                        let repeat = pd.events.iter().rev().take(8).any(|e| e.kind == "snap_yaw" && bs.tick - e.tick <= SNAP_DEDUPE);
+                        if is_sapper(&w) && !repeat {
+                            let yaw_err = landed;
+                            pd.events.push(Event {
+                                tick: bs.tick,
+                                kind: "snap_yaw",
+                                size: step,
+                                data: json!({
+                                    "kind": "snap_yaw",
+                                    "building": ty,
+                                    "entity": ent,
+                                    "own_building": own,
+                                    "enemy_building": true,
+                                    "weapon": w,
+                                    "yaw_error_deg": (yaw_err.abs() * 100.0).round() / 100.0,
+                                    "snap_deg": (step * 100.0).round() / 100.0,
+                                    "distance": (hd * hd + dz * dz).sqrt().round(),
+                                }),
+                            });
+                        }
                     }
                 }
 
@@ -420,6 +485,8 @@ impl<'a> CheatAlgorithm<'a> for BuildingAimbot {
         let lock_cfg = (min_samples, min_sweep, get_parameter_value::<f32>(&self.params, "min_yaw_lock_sweep"), get_parameter_value::<f32>(&self.params, "lock_pitch_tolerance"));
         let min_silent =get_parameter_value::<i32>(&self.params, "min_silent").max(1) as usize;
         let min_silent_yaw = get_parameter_value::<i32>(&self.params, "min_silent_yaw").max(1) as usize;
+        let min_snap_yaw = get_parameter_value::<i32>(&self.params, "min_snap_yaw").max(1) as usize;
+        let min_silent_box = get_parameter_value::<i32>(&self.params, "min_silent_box").max(1) as usize;
         let max_detections = get_parameter_value::<i32>(&self.params, "max_detections").max(1) as usize;
         let mut detections = Vec::new();
         let mut sids: Vec<u64> = self.players.keys().copied().collect();
@@ -432,10 +499,20 @@ impl<'a> CheatAlgorithm<'a> for BuildingAimbot {
             let locks: Vec<&Event> = pd.events.iter().filter(|e| e.kind == "lock").collect();
             let silents: Vec<&Event> = pd.events.iter().filter(|e| e.kind == "silent").collect();
             let silents_yaw: Vec<&Event> = pd.events.iter().filter(|e| e.kind == "silent_yaw").collect();
+            let snaps_yaw: Vec<&Event> = pd.events.iter().filter(|e| e.kind == "snap_yaw").collect();
+            let silents_box: Vec<&Event> = pd.events.iter().filter(|e| e.kind == "silent_box").collect();
             let total_sweep: f32 = locks.iter().map(|e| e.size).sum();
             let mut report: Vec<&Event> = Vec::new();
-            for (events, min) in [(locks.clone(), 1), (silents.clone(), min_silent), (silents_yaw.clone(), min_silent_yaw)] {
-                if events.len() >= min {
+            // snap_yaw counts together with silent_yaw: both are the auto sapper's yaw on the centre
+            let sapper_yaw = snaps_yaw.len() + silents_yaw.len() >= min_snap_yaw;
+            for (events, report_kind) in [
+                (locks.clone(), !locks.is_empty()),
+                (silents.clone(), silents.len() >= min_silent),
+                (silents_yaw.clone(), silents_yaw.len() >= min_silent_yaw || sapper_yaw),
+                (snaps_yaw.clone(), sapper_yaw),
+                (silents_box.clone(), silents_box.len() >= min_silent_box),
+            ] {
+                if report_kind && !events.is_empty() {
                     let mut e = events;
                     e.sort_by(|a, b| b.size.total_cmp(&a.size));
                     report.extend(e.into_iter().take(max_detections));
@@ -447,6 +524,8 @@ impl<'a> CheatAlgorithm<'a> for BuildingAimbot {
                 data["player_locks"] = json!(locks.len());
                 data["player_silent"] = json!(silents.len());
                 data["player_silent_yaw"] = json!(silents_yaw.len());
+                data["player_snap_yaw"] = json!(snaps_yaw.len());
+                data["player_silent_box"] = json!(silents_box.len());
                 detections.push(Detection { tick: e.tick, algorithm: ALGORITHM_NAME.to_string(), player: sid, data });
             }
         }

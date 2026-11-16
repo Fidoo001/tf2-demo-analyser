@@ -26,7 +26,6 @@ use tf_demo_parser::demo::message::{GameEventMessage, Message};
 use tf_demo_parser::demo::sendprop::SendPropIdentifier;
 use tf_demo_parser::{MessageType, ParserState};
 
-use crate::algorithms::fidoo::ml_backtrack::is_precise;
 use crate::base::cheat_analyser_base::{CheatAnalyserState, Player, PlayerState};
 use crate::lib::algorithm::{CheatAlgorithm, Detection};
 use crate::lib::parameters::{get_parameter_value, Parameter, Parameters};
@@ -35,6 +34,20 @@ use crate::util::nocrex::jankguard::JankGuard;
 
 const BULLETS_PLAYER: SendPropIdentifier = SendPropIdentifier::new("DT_TEFireBullets", "m_iPlayer");
 const BULLETS_WEAPON: SendPropIdentifier = SendPropIdentifier::new("DT_TEFireBullets", "m_iWeaponID");
+
+/// Same exclusions as fidoo/plain_aimbot, keeping only weapons without spread
+fn is_precise(name: &str) -> bool {
+    let lw = name.to_lowercase();
+    if lw.contains("huntsman") || lw.contains("fortified compound") || lw.contains("smg") || lw.contains("carbine") {
+        return false;
+    }
+    [
+        "sniper rifle", "machina", "hitman", "bazaar", "classic", "sydney", "awper", "shooting star", "ap-sap",
+        "revolver", "ambassador", "enforcer", "diamondback", "l'etranger", "big kill",
+    ]
+    .iter()
+    .any(|w| lw.contains(w))
+}
 
 /// Largest rewind tried, in ticks (sv_maxunlag 1 s plus a little)
 pub const MAX_LAG: usize = 70;

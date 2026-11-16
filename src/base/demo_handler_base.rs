@@ -139,6 +139,10 @@ impl<'a, T: DemoHandlerAnalyser> CheatDemoHandler<'a, T> {
                     signon,
                     tail_bits: packet.tail_bits,
                     tail_value: packet.tail_value,
+                    client_view_angles: [
+                        packet.meta.view_angles[0].angles.x,
+                        packet.meta.view_angles[0].angles.y,
+                    ],
                 });
             }
             Packet::UserCmd(packet) => {

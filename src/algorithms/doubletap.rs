@@ -18,14 +18,14 @@
 use std::collections::{HashMap, VecDeque};
 
 use anyhow::Error;
-use serde_json::{Map, Value};
+use serde_json::{json, Map, Value};
 use steamid_ng::SteamID;
 use tf_demo_parser::demo::message::packetentities::EntityId;
 use tf_demo_parser::demo::message::Message;
 use tf_demo_parser::demo::sendprop::SendPropIdentifier;
 use tf_demo_parser::{MessageType, ParserState};
 
-use crate::base::cheat_analyser_base::{CheatAnalyserState, Player};
+use crate::base::cheat_analyser_base::{CheatAnalyserState, Player, PlayerState};
 use crate::lib::algorithm::{CheatAlgorithm, Detection};
 use crate::lib::parameters::{get_parameter_value, Parameter, Parameters};
 use crate::util::helpers::handle_to_entid;
@@ -35,6 +35,11 @@ const TICKS_PER_SECOND: f32 = 66.67;
 /// Attack events a firing minigun emits per tick of simulated time (measured on real demos: median 1.14, 99th percentile
 /// 1.21 over 33-tick windows). It emits about one event per tick, not one per shot, and slightly more than one.
 const MINIGUN_EVENTS_PER_TICK: f32 = 1.2;
+/// Conditions that change fire rate or movement (Mannpower runes, Halloween spells): never judged.
+const IGNORED_CONDS: [u32; 7] = [34, 72, 81, 91, 96, 109, 113];
+/// Player confidence is a logistic curve over the evidence score, centered at `CONF_MID`.
+const CONF_MID: f32 = 16.0;
+const CONF_SLOPE: f32 = 3.0;
 
 /// Collects the shooters of the primary attack events (PLAYERANIMEVENT_ATTACK_PRIMARY = 0) of a TempEntities message.
 /// Every event of a message is delta encoded against the previous event of the same class (zero for the
@@ -147,7 +152,6 @@ struct PendingShot {
     class_name: String,
     item: Option<u16>,
     weapon_name: String,
-    player_class: &'static str,
 }
 
 #[derive(Clone, Copy)]
@@ -174,7 +178,10 @@ pub struct DoubleTap {
     active: HashMap<u64, (usize, u32)>,
     /// detections held back until the player has enough evidence, with the weight of each
     buffered: Vec<(Detection, u32)>,
-    weights: HashMap<u64, u32>,
+    /// tick since which the player has been alive and in PVS (their weapon and state are known)
+    ok_since: HashMap<u64, u32>,
+    /// shots up to this tick are not judged because of an ignored condition
+    cond_until: HashMap<u64, u32>,
     /// auto weapons: event ticks inside the rolling window, and the tick the next rate flag is allowed
     auto_events: HashMap<(u64, usize), (VecDeque<u32>, u32)>,
 }
@@ -204,9 +211,18 @@ impl DoubleTap {
                 f("same_frame_ratio", 0.5),
                 // shots right after a weapon switch are attributed to the wrong weapon, ignore them
                 i("switch_guard_ticks", 3),
-                // evidence needed before a player is reported at all (same_frame counts 2, short_interval 1).
-                // Default 1 = report everything; incident grouping / suspicion scoring downstream decides.
-                i("min_events", 1),
+                // a player is reported only when their flags add up to this confidence (percent): many flags across several
+                // separate episodes score high, one burst that never repeats scores low
+                f("min_confidence", 70.0),
+                // flags closer together than this many ticks belong to the same episode
+                i("episode_gap_ticks", 1000),
+                // when this many players reach min_confidence in one demo the cause is the server or map (a fire rate effect no condition
+                // shows), not cheaters, so nothing is reported. 0 = off (needed for demos of servers full of cheaters)
+                i("max_flagged_players", 5),
+                // shots are ignored until this many ticks after the player is alive and in PVS again (their weapon is unknown before)
+                i("pvs_grace_ticks", 7),
+                // shots are ignored for this many ticks after an ignored condition ends
+                i("cond_guard_ticks", 33),
                 // SMG, pistols, syringe gun: shots inside the window may exceed the weapon's maximum by at most `auto_slack`
                 // (real play peaks at the maximum +1)
                 b("auto_rate", true),
@@ -232,12 +248,15 @@ fn player_sid(p: &Player) -> Option<u64> {
 }
 
 /// Keys are padded with zero-width spaces so they keep their order in the output.
-fn build_data(items: Vec<(&str, Value)>) -> Value {
-    let mut m = Map::new();
-    for (i, (k, v)) in items.into_iter().enumerate() {
-        m.insert(format!("{}{}", "\u{200B}".repeat(i), k), v);
+fn push_key(data: &mut Value, k: &str, v: Value) {
+    if let Value::Object(m) = data {
+        m.insert(format!("{}{}", "\u{200B}".repeat(m.len()), k), v);
     }
-    Value::Object(m)
+}
+
+fn has_ignored_cond(p: &Player) -> bool {
+    let bits = [p.cond, p.cond_ex, p.cond_ex2, p.cond_ex3];
+    IGNORED_CONDS.iter().any(|&c| bits[(c / 32) as usize] >> (c % 32) & 1 != 0)
 }
 
 /// Largest simulation tick step in the 30 ticks before `tick` (lag spike / choke).
@@ -260,9 +279,7 @@ impl<'a> CheatAlgorithm<'a> for DoubleTap {
     }
 
     fn tooltip(&self) -> &'static str {
-        "Detects tick shifting (doubletap): a weapon fired again long before its refire delay has elapsed, \
-         several shots inside one snapshot, or more shots than the weapon can fire in a time window. \
-         Bursts explained by lag catch-ups are ignored."
+        "Detects tick shifting (doubletap): a weapon fired again long before its refire delay has elapsed,          several shots inside one snapshot, or more shots than the weapon can fire in a time window.          Bursts explained by lag catch-ups are ignored, and a player is only reported once their flags add up to enough confidence."
     }
 
     fn on_tick(&mut self, state: &CheatAnalyserState, _: &ParserState) -> Result<Vec<Detection>, Error> {
@@ -273,6 +290,7 @@ impl<'a> CheatAlgorithm<'a> for DoubleTap {
         let tick = state.server_tick;
         let gap = tick.saturating_sub(self.prev_frame_tick).max(1);
         self.prev_frame_tick = tick;
+        let cond_guard = get_parameter_value::<i32>(&self.params, "cond_guard_ticks").max(0) as u32;
 
         for p in &state.players {
             let Some(sid) = player_sid(p) else { continue };
@@ -290,6 +308,14 @@ impl<'a> CheatAlgorithm<'a> for DoubleTap {
                     self.active.insert(sid, (ent, tick));
                 }
             }
+            if p.in_pvs && p.state == PlayerState::Alive {
+                self.ok_since.entry(sid).or_insert(tick);
+            } else {
+                self.ok_since.remove(&sid);
+            }
+            if has_ignored_cond(p) {
+                self.cond_until.insert(sid, tick + cond_guard);
+            }
         }
 
         if self.pending.is_empty() {
@@ -303,8 +329,8 @@ impl<'a> CheatAlgorithm<'a> for DoubleTap {
         let int = |n: &str| get_parameter_value::<i32>(params, n).max(0) as u32;
         let flt = |n: &str| get_parameter_value::<f32>(params, n);
         let flag = |n: &str| get_parameter_value::<bool>(params, n);
-        let (switch_guard, tolerance, auto_window, auto_slack, minigun_excess) =
-            (int("switch_guard_ticks"), int("tolerance_ticks"), int("auto_window_ticks").max(1), int("auto_slack"), int("minigun_excess").max(1));
+        let (switch_guard, tolerance, auto_window, auto_slack, minigun_excess, pvs_grace) =
+            (int("switch_guard_ticks"), int("tolerance_ticks"), int("auto_window_ticks").max(1), int("auto_slack"), int("minigun_excess").max(1), int("pvs_grace_ticks"));
         let (same_frame_on, auto_rate, minigun_burst, lag_excuse) =
             (flag("same_frame"), flag("auto_rate"), flag("minigun_burst"), flag("lag_excuse"));
         let (same_frame_ratio, max_floor_ratio, lag_excuse_ratio) = (flt("same_frame_ratio"), flt("max_floor_ratio"), flt("lag_excuse_ratio"));
@@ -317,6 +343,10 @@ impl<'a> CheatAlgorithm<'a> for DoubleTap {
 
         for (key @ (sid, weapon_ent), (first_idx, events)) in counts {
             let shot = &pending[first_idx];
+            // players out of sight or dead have a stale weapon and position, and ignored conditions change fire rates
+            if self.ok_since.get(&sid).map_or(true, |s| tick.saturating_sub(*s) < pvs_grace) || self.cond_until.get(&sid).is_some_and(|u| tick <= *u) {
+                continue;
+            }
             let Some(profile) = weapon_profile(&shot.class_name, shot.item) else {
                 continue;
             };
@@ -338,15 +368,15 @@ impl<'a> CheatAlgorithm<'a> for DoubleTap {
             };
             let floor = profile.ticks as u32;
 
-            // (type, interval, threshold, shots reported, refire time missing in ticks)
-            let mut hit: Option<(&str, u32, i64, u32, f32)> = None;
+            // (type, interval, shots reported, refire time missing in ticks)
+            let mut hit: Option<(&str, u32, u32, f32)> = None;
             if profile.kind == Kind::Minigun {
                 if minigun_burst && events >= gap + minigun_excess {
-                    hit = Some(("minigun_burst", gap, (gap + minigun_excess) as i64, events, (events - gap) as f32));
+                    hit = Some(("minigun_burst", gap, events, (events - gap) as f32));
                 }
             } else {
                 if same_frame_on && shots >= 2 && (gap as f32) < (shots - 1) as f32 * floor as f32 * same_frame_ratio {
-                    hit = Some(("same_frame", 0, (floor as f32 * same_frame_ratio) as i64, shots, floor as f32 * (shots - 1) as f32));
+                    hit = Some(("same_frame", 0, shots, floor as f32 * (shots - 1) as f32));
                 }
                 if profile.kind == Kind::Semi && hit.is_none() {
                     if let Some(last) = self.last.get(&key) {
@@ -355,13 +385,7 @@ impl<'a> CheatAlgorithm<'a> for DoubleTap {
                         let threshold = (floor as f32 * max_floor_ratio).floor() as i64 - tolerance as i64 - slack as i64;
                         // very fast weapons leave no usable margin, an interval there proves nothing
                         if threshold >= 6 && (interval as i64) < threshold {
-                            hit = Some((
-                                "short_interval",
-                                interval,
-                                threshold,
-                                shots,
-                                floor.saturating_sub(interval) as f32 * (shots.max(2) - 1) as f32,
-                            ));
+                            hit = Some(("short_interval", interval, shots, floor.saturating_sub(interval) as f32 * (shots.max(2) - 1) as f32));
                         }
                     }
                 }
@@ -374,7 +398,7 @@ impl<'a> CheatAlgorithm<'a> for DoubleTap {
                     let (n, legal) = (dq.len() as u32, (auto_window as f32 / profile.ticks).ceil() as u32);
                     if hit.is_none() && n > legal + auto_slack && tick >= *cooldown {
                         *cooldown = tick + auto_window;
-                        hit = Some(("rate", auto_window, (legal + auto_slack) as i64, n, (n - legal) as f32 * profile.ticks));
+                        hit = Some(("rate", auto_window, n, (n - legal) as f32 * profile.ticks));
                     }
                 }
             }
@@ -386,7 +410,7 @@ impl<'a> CheatAlgorithm<'a> for DoubleTap {
             };
             self.last.insert(key, LastShot { tick, demo_tick, gap });
 
-            let Some((kind, interval, threshold, shots_reported, missing)) = hit else {
+            let Some((kind, interval, shots_reported, missing)) = hit else {
                 continue;
             };
             // A lag burst (choke / packet loss) makes the server run the queued commands of several ticks in one
@@ -405,31 +429,20 @@ impl<'a> CheatAlgorithm<'a> for DoubleTap {
                 continue;
             }
             let weight = if kind == "same_frame" || kind == "minigun_burst" || kind == "rate" { 2 } else { 1 };
-            *self.weights.entry(sid).or_default() += weight;
-            self.buffered.push((
-                Detection {
-                    tick: demo_tick,
-                    algorithm: self.algorithm_name().to_string(),
-                    player: sid,
-                    data: build_data(vec![
-                        ("class", Value::from(shot.player_class)),
-                        ("weapon", Value::from(shot.weapon_name.clone())),
-                        ("type", Value::from(kind)),
-                        ("tick_1", Value::from(prev_tick)),
-                        ("tick_2", Value::from(demo_tick)),
-                        ("tick_diff", Value::from(interval)), // in server ticks (the window for rate, the snapshot gap for minigun_burst)
-                        ("min_interval", Value::from(floor)),
-                        ("threshold", Value::from(threshold)),
-                        ("shots_in_snapshot", Value::from(shots_reported)), // events in the window for rate, in the snapshot for minigun_burst
-                        ("snapshot_gap", Value::from(gap)),
-                        ("interval_ratio", Value::from(if floor > 0 { interval as f32 / floor as f32 } else { 0.0 })),
-                        ("ping_ms", Value::from(shot.ping)),
-                        ("sim_gap_ticks", Value::from(sim_gap)),
-                        ("weapon_class", Value::from(shot.class_name.clone())),
-                    ]),
-                },
-                weight,
-            ));
+            let mut data = Value::Object(Map::new());
+            push_key(&mut data, "weapon", json!(shot.weapon_name));
+            push_key(&mut data, "type", json!(kind));
+            push_key(&mut data, "tick_1", json!(prev_tick));
+            push_key(&mut data, "tick_2", json!(demo_tick));
+            // server ticks, unlike tick_1/tick_2 (the window for rate, the snapshot gap for minigun_burst)
+            push_key(&mut data, "server_ticks", json!(interval));
+            push_key(&mut data, "min_server_ticks", json!(floor));
+            if kind != "short_interval" {
+                // events in the window for rate, in the snapshot for minigun_burst
+                push_key(&mut data, "shots", json!(shots_reported));
+            }
+            push_key(&mut data, "ping_ms", json!(shot.ping));
+            self.buffered.push((Detection { tick: demo_tick, algorithm: self.algorithm_name().to_string(), player: sid, data }, weight));
         }
         Ok(vec![])
     }
@@ -462,20 +475,41 @@ impl<'a> CheatAlgorithm<'a> for DoubleTap {
                 class_name: weapon.class_name.clone(),
                 item: weapon.item_def_index,
                 weapon_name: weapon.name(player.class),
-                player_class: player.class_name(),
             });
         }
         Ok(vec![])
     }
 
     fn finish(&mut self) -> Result<Vec<Detection>, Error> {
-        let min_events = get_parameter_value::<i32>(&self.params, "min_events").max(1) as u32;
-        let weights = &self.weights;
-        let mut out: Vec<Detection> = std::mem::take(&mut self.buffered)
-            .into_iter()
-            .filter(|(d, _)| weights.get(&d.player).copied().unwrap_or(0) >= min_events)
-            .map(|(d, _)| d)
-            .collect();
+        let episode_gap = get_parameter_value::<i32>(&self.params, "episode_gap_ticks").max(1) as u32;
+        let min_confidence = get_parameter_value::<f32>(&self.params, "min_confidence");
+        let max_players = get_parameter_value::<i32>(&self.params, "max_flagged_players").max(0) as usize;
+        let mut by_player: HashMap<u64, Vec<(Detection, u32)>> = HashMap::new();
+        for (d, weight) in std::mem::take(&mut self.buffered) {
+            by_player.entry(d.player).or_default().push((d, weight));
+        }
+        let mut players = Vec::new();
+        for (_, mut flags) in by_player {
+            flags.sort_by_key(|(d, _)| d.tick);
+            let weight: u32 = flags.iter().map(|(_, w)| w).sum();
+            let episodes = 1 + flags.windows(2).filter(|w| w[1].0.tick - w[0].0.tick > episode_gap).count() as u32;
+            // repeated flags in separate episodes are what a real doubletapper produces, a single burst barely counts
+            let evidence = ((episodes - 1) * weight) as f32 + (weight * weight) as f32 / 64.0;
+            let confidence = (100.0 / (1.0 + (-(evidence - CONF_MID) / CONF_SLOPE).exp())).min(99.99);
+            if confidence >= min_confidence {
+                players.push((flags, confidence));
+            }
+        }
+        if max_players > 0 && players.len() >= max_players {
+            return Ok(vec![]);
+        }
+        let mut out = Vec::new();
+        for (flags, confidence) in players {
+            for (mut d, _) in flags {
+                push_key(&mut d.data, "confidence", json!((confidence as f64 * 100.0).round() / 100.0));
+                out.push(d);
+            }
+        }
         out.sort_by_key(|d| d.tick);
         Ok(out)
     }

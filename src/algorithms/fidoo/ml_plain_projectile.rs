@@ -47,6 +47,14 @@ const FLAME_START: f32 = 40.0;
 const MIN_STEP: f32 = 0.18;
 const MIN_DISTANCE: f32 = 60.0;
 const MAX_DISTANCE: f32 = 2500.0;
+/// A projectile key seen this many ticks ago belongs to an earlier projectile (Delete events can be missed)
+const KEY_EXPIRY_TICKS: u32 = 4000;
+/// A projectile first seen farther than this from its owner's eye is mid-flight (fired outside the
+/// snapshots we have, or re-entering the PVS), not a launch on this tick
+const MAX_LAUNCH_DISTANCE: f32 = 250.0;
+/// Events of one player against the same target with gaps up to this many ticks form one incident
+/// (one detection per incident instead of one per projectile / flame burst)
+const INCIDENT_GAP_TICKS: u32 = 200;
 
 static MODEL: OnceLock<Option<Model>> = OnceLock::new();
 
@@ -96,7 +104,16 @@ pub fn unit_feature_names() -> Vec<String> {
     names.push("lead_dominance_share".to_string());
     names.push("instant_reaction_share".to_string());
     names.push("corner_oscillation_share".to_string());
+    // stacked: aggregates of the event model's scores (all events, and per incident of 2+ events)
+    for n in ["es_med", "es_p90", "es_mean", "es_top3", "inc_es_max", "inc_es_med"] {
+        names.push(n.to_string());
+    }
     names
+}
+
+/// Features of the event model: the aggregated event features (no distance / target speed context)
+pub fn event_model_feature_names() -> Vec<String> {
+    EVENT_FEATURES[..AGGREGATED].iter().map(|f| f.to_string()).collect()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -142,6 +159,11 @@ impl WeaponKind {
             WeaponKind::Other => None,
         }
     }
+}
+
+/// Rocket Jumper / Sticky Jumper: their projectiles deal no damage, so they are not aimed at enemies
+pub fn is_jumper_weapon(name: &str) -> bool {
+    name.to_lowercase().contains("jumper")
 }
 
 pub fn classify_weapon(name: &str) -> WeaponKind {
@@ -239,6 +261,9 @@ pub struct MlPlainProjectile {
     players: HashMap<u64, PlayerHistory>,
     pending: Vec<PendingEvent>,
     flame_hits: HashMap<u64, u32>,
+    /// (entity index, serial) of projectiles already seen: projectiles re-Enter the snapshot every
+    /// tick while flickering at the PVS edge
+    seen_projectiles: HashMap<(u32, u32), u32>,
     recorder: Option<u64>,
     pub events: Vec<EventRecord>,
     pub units: Vec<UnitRecord>,
@@ -385,6 +410,13 @@ fn prop_int(props: &[SendProp], ids: &[(&str, &str)]) -> Option<i64> {
     ids.iter().find_map(|(table, name)| {
         let id = SendPropIdentifier::new(table, name);
         props.iter().find(|p| p.identifier == id).and_then(|p| i64::try_from(&p.value).ok())
+    })
+}
+
+fn prop_vector(props: &[SendProp], ids: &[(&str, &str)]) -> Option<Vector> {
+    ids.iter().find_map(|(table, name)| {
+        let id = SendPropIdentifier::new(table, name);
+        props.iter().find(|p| p.identifier == id).and_then(|p| Vector::try_from(&p.value).ok())
     })
 }
 
@@ -735,6 +767,11 @@ impl<'a> CheatAlgorithm<'a> for MlPlainProjectile {
         match message {
             Message::PacketEntities(packet) => {
                 for entity in &packet.entities {
+                    let key = (u32::from(entity.entity_index), entity.serial_number);
+                    if entity.update_type == UpdateType::Delete {
+                        self.seen_projectiles.remove(&key);
+                        continue;
+                    }
                     if entity.update_type != UpdateType::Enter {
                         continue;
                     }
@@ -769,8 +806,23 @@ impl<'a> CheatAlgorithm<'a> for MlPlainProjectile {
                     if self.recorder == Some(sid) || !player.in_pvs || player.state != PlayerState::Alive {
                         continue;
                     }
+                    // a key seen recently: the projectile re-entered the PVS
+                    if self.seen_projectiles.get(&key).is_some_and(|&first| tick_u32.saturating_sub(first) < KEY_EXPIRY_TICKS) {
+                        continue;
+                    }
+                    self.seen_projectiles.insert(key, tick_u32);
+                    let merged: Vec<SendProp> = entity.props(parser_state).collect();
+                    let origin = prop_vector(&merged, &[("DT_TFBaseRocket", "m_vecOrigin"), ("DT_TFWeaponBaseGrenadeProj", "m_vecOrigin"), ("DT_BaseEntity", "m_vecOrigin")]);
+                    let eye = eye_position(player);
+                    if origin.is_some_and(|o| ((o.x - eye.x).powi(2) + (o.y - eye.y).powi(2) + (o.z - eye.z).powi(2)).sqrt() > MAX_LAUNCH_DISTANCE) {
+                        continue;
+                    }
 
                     let weapon = state.get_player_weapon(player);
+                    // Rocket / Sticky Jumper launches deal no damage (rocket jumps, not aimed at enemies)
+                    if is_jumper_weapon(&weapon) {
+                        continue;
+                    }
                     let actual_kind = match classify_weapon(&weapon) {
                         WeaponKind::Other => kind,
                         k => k,
@@ -880,6 +932,10 @@ impl<'a> CheatAlgorithm<'a> for MlPlainProjectile {
         }
 
         let model = MODEL.get_or_init(load_model);
+        // every event is scored by the event model; the unit model uses aggregates of these scores
+        for ev in &mut self.events {
+            ev.score = model.as_ref().map_or(f32::NAN, |m| m.event.predict(&ev.features[..AGGREGATED]));
+        }
 
         for (&player, event_indices) in &by_player {
             if event_indices.len() < min_events as usize {
@@ -924,7 +980,7 @@ impl<'a> CheatAlgorithm<'a> for MlPlainProjectile {
             }
 
             let n = event_indices.len() as f32;
-            let mut u_features = Vec::with_capacity(71);
+            let mut u_features = Vec::with_capacity(77);
 
             for col in &mut cols {
                 u_features.push(median(col));
@@ -942,6 +998,19 @@ impl<'a> CheatAlgorithm<'a> for MlPlainProjectile {
             u_features.push(if cs_count > 0 { instant_reaction_count as f32 / cs_count as f32 } else { 0.0 });
             u_features.push(corner_osc_count as f32 / n);
 
+            let mut es: Vec<f32> = event_indices.iter().map(|&i| self.events[i].score).filter(|v| !v.is_nan()).collect();
+            let es_mean = if es.is_empty() { f32::NAN } else { es.iter().sum::<f32>() / es.len() as f32 };
+            u_features.push(median(&mut es));
+            u_features.push(quantile(&mut es, 0.90));
+            u_features.push(es_mean);
+            // `es` is sorted by the quantile calls
+            let top = &es[es.len().saturating_sub(3)..];
+            u_features.push(if top.is_empty() { f32::NAN } else { top.iter().sum::<f32>() / top.len() as f32 });
+            let p_events: Vec<&EventRecord> = event_indices.iter().map(|&i| &self.events[i]).collect();
+            let mut inc_scores: Vec<f32> = group_incidents(&p_events).iter().filter(|i| i.n >= 2).map(|i| i.rank).filter(|v| !v.is_nan()).collect();
+            u_features.push(inc_scores.iter().copied().fold(f32::NAN, f32::max));
+            u_features.push(median(&mut inc_scores));
+
             let score = model.as_ref().map_or(f32::NAN, |m| m.predict_unit(&u_features));
 
             self.units.push(UnitRecord {
@@ -958,35 +1027,40 @@ impl<'a> CheatAlgorithm<'a> for MlPlainProjectile {
 
         let mut detections = Vec::new();
         for u in &self.units {
-            if u.score >= min_score {
-                // Find top scoring or most suspicious events
-                let mut p_events: Vec<&EventRecord> = self.events.iter().filter(|e| e.attacker == u.player).collect();
-                p_events.sort_by(|a, b| {
-                    let lead_a = a.features[IDX_LEAD_ADV];
-                    let lead_b = b.features[IDX_LEAD_ADV];
-                    lead_b.partial_cmp(&lead_a).unwrap_or(std::cmp::Ordering::Equal)
+            if u.score < min_score {
+                continue;
+            }
+            let p_events: Vec<&EventRecord> = self.events.iter().filter(|e| e.attacker == u.player).collect();
+            let mut incidents = group_incidents(&p_events);
+            incidents.sort_by(|a, b| {
+                let (ra, rb) = (if a.rank.is_nan() { f32::NEG_INFINITY } else { a.rank }, if b.rank.is_nan() { f32::NEG_INFINITY } else { b.rank });
+                rb.total_cmp(&ra).then(a.start.cmp(&b.start))
+            });
+            for inc in incidents.into_iter().take(max_detections as usize) {
+                let ev = p_events[inc.best];
+                detections.push(Detection {
+                    tick: ev.tick.into(),
+                    algorithm: self.algorithm_name().to_string(),
+                    player: u.player,
+                    data: json!({
+                        "score": u.score,
+                        "events": u.n_events,
+                        "weapon": ev.weapon,
+                        "target": ev.target,
+                        "incident_start_tick": inc.start,
+                        "incident_end_tick": inc.end,
+                        "incident_events": inc.n,
+                        "incident_score": inc.rank,
+                        "event_score": ev.score,
+                        "err_lead_deg": ev.features[0],
+                        "err_direct_deg": ev.features[1],
+                        "lead_adv_deg": ev.features[4],
+                        "stillness": ev.features[13],
+                        "jerk": ev.features[14],
+                        "reaction_ticks": ev.features[20],
+                        "dist": ev.features[22],
+                    }),
                 });
-
-                for ev in p_events.into_iter().take(max_detections as usize) {
-                    detections.push(Detection {
-                        tick: ev.tick.into(),
-                        algorithm: self.algorithm_name().to_string(),
-                        player: u.player,
-                        data: json!({
-                            "score": u.score,
-                            "events": u.n_events,
-                            "weapon": ev.weapon,
-                            "target": ev.target,
-                            "err_lead_deg": ev.features[0],
-                            "err_direct_deg": ev.features[1],
-                            "lead_adv_deg": ev.features[4],
-                            "stillness": ev.features[13],
-                            "jerk": ev.features[14],
-                            "reaction_ticks": ev.features[20],
-                            "dist": ev.features[22],
-                        }),
-                    });
-                }
             }
         }
 
@@ -994,40 +1068,83 @@ impl<'a> CheatAlgorithm<'a> for MlPlainProjectile {
     }
 }
 
-// Model evaluator
+/// Consecutive events of one player against the same target (gaps up to `INCIDENT_GAP_TICKS`)
+struct Incident {
+    start: u32,
+    end: u32,
+    n: usize,
+    /// index (into the player's events) of the event with the highest event model score
+    best: usize,
+    /// mean event model score of the incident's events
+    rank: f32,
+    sum: f32,
+}
+
+/// Groups a player's events (in tick order) into incidents per target
+fn group_incidents(events: &[&EventRecord]) -> Vec<Incident> {
+    let mut order: Vec<usize> = (0..events.len()).collect();
+    order.sort_by_key(|&i| (events[i].tick, i));
+    let mut incidents: Vec<Incident> = Vec::new();
+    let mut open: HashMap<u64, usize> = HashMap::new();
+    for i in order {
+        let ev = events[i];
+        match open.get(&ev.target).copied() {
+            Some(k) if ev.tick.saturating_sub(incidents[k].end) <= INCIDENT_GAP_TICKS => {
+                let inc = &mut incidents[k];
+                inc.end = ev.tick;
+                inc.n += 1;
+                inc.sum += ev.score;
+                if ev.score > events[inc.best].score || events[inc.best].score.is_nan() {
+                    inc.best = i;
+                }
+            }
+            _ => {
+                open.insert(ev.target, incidents.len());
+                incidents.push(Incident { start: ev.tick, end: ev.tick, n: 1, best: i, rank: f32::NAN, sum: ev.score });
+            }
+        }
+    }
+    for inc in &mut incidents {
+        inc.rank = inc.sum / inc.n as f32;
+    }
+    incidents
+}
+
+// Model evaluator (same semantics as LightGBM and `predict_flat` in scripts/ml_plain_projectile_train.py)
 #[derive(Deserialize)]
 struct FlatTree {
     feature: Vec<usize>,
-    threshold: Vec<f32>,
+    threshold: Vec<f64>,
     left: Vec<i32>,
     right: Vec<i32>,
     default_left: Vec<bool>,
+    /// 0 none (NaN -> 0), 1 zero, 2 NaN
     missing: Vec<u8>,
-    leaf: Vec<f32>,
+    leaf: Vec<f64>,
 }
 
 impl FlatTree {
-    fn eval(&self, x: &[f32]) -> f32 {
+    fn eval(&self, x: &[f32]) -> f64 {
         if self.feature.is_empty() {
-            return 0.0;
+            return self.leaf.first().copied().unwrap_or(0.0);
         }
-        let mut idx = 0i32;
-        while idx >= 0 {
-            let i = idx as usize;
-            let val = x[self.feature[i]];
-            let is_missing = val.is_nan();
-            let go_left = if is_missing {
-                match self.missing[i] {
-                    1 => 0.0 <= self.threshold[i],
-                    2 => self.default_left[i],
-                    _ => false,
-                }
-            } else {
-                val <= self.threshold[i]
+        let mut node = 0i32;
+        while node >= 0 {
+            let n = node as usize;
+            let mut v = f64::from(x[self.feature[n]]);
+            let missing = self.missing[n];
+            let go_default = match missing {
+                2 => v.is_nan(),
+                1 => v.is_nan() || v.abs() <= 1e-35,
+                _ => false,
             };
-            idx = if go_left { self.left[i] } else { self.right[i] };
+            if missing != 2 && v.is_nan() {
+                v = 0.0;
+            }
+            let left = if go_default { self.default_left[n] } else { v <= self.threshold[n] };
+            node = if left { self.left[n] } else { self.right[n] };
         }
-        self.leaf[(!idx) as usize]
+        self.leaf[(!node) as usize]
     }
 }
 
@@ -1039,18 +1156,20 @@ struct FlatBooster {
 
 impl FlatBooster {
     fn predict(&self, x: &[f32]) -> f32 {
-        let sum: f32 = self.trees.iter().map(|t| t.eval(x)).sum();
-        1.0 / (1.0 + (-sum).exp())
+        let sum: f64 = self.trees.iter().map(|t| t.eval(x)).sum();
+        (1.0 / (1.0 + (-sum).exp())) as f32
     }
 }
 
 #[derive(Deserialize)]
 struct ModelJson {
     unit: Option<FlatBooster>,
+    event: Option<FlatBooster>,
 }
 
 struct Model {
     unit: FlatBooster,
+    event: FlatBooster,
 }
 
 impl Model {
@@ -1063,8 +1182,42 @@ fn load_model() -> Option<Model> {
     let raw = include_str!("../../../assets/ml_plain_projectile_model.json");
     let parsed: ModelJson = serde_json::from_str(raw).ok()?;
     let unit = parsed.unit?;
-    if unit.features != unit_feature_names() {
+    let event = parsed.event?;
+    if unit.features != unit_feature_names() || event.features != event_model_feature_names() {
         return None;
     }
-    Some(Model { unit })
+    Some(Model { unit, event })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ev(tick: u32, target: u64, score: f32) -> EventRecord {
+        EventRecord { tick, attacker: 1, target, weapon: String::new(), kind: WeaponKind::Flame, features: [0.0; EVENT_FEATURES.len()], score }
+    }
+
+    #[test]
+    fn incidents_group_per_target_and_gap() {
+        let events = [ev(100, 2, 0.2), ev(110, 3, 0.9), ev(120, 2, 0.6), ev(120 + INCIDENT_GAP_TICKS + 1, 2, 0.1)];
+        let refs: Vec<&EventRecord> = events.iter().collect();
+        let inc = group_incidents(&refs);
+        assert_eq!(inc.len(), 3);
+        // target 2, ticks 100-120: mean of 0.2 and 0.6, best = the 0.6 event
+        assert_eq!((inc[0].start, inc[0].end, inc[0].n, inc[0].best), (100, 120, 2, 2));
+        assert!((inc[0].rank - 0.4).abs() < 1e-6);
+        assert_eq!((inc[1].n, inc[1].best), (1, 1));
+        assert_eq!(inc[2].start, 120 + INCIDENT_GAP_TICKS + 1);
+    }
+
+    #[test]
+    fn feature_name_counts() {
+        assert_eq!(unit_feature_names().len(), AGGREGATED * 3 + 5 + 6);
+        assert_eq!(event_model_feature_names().len(), AGGREGATED);
+    }
+
+    #[test]
+    fn embedded_model_loads() {
+        assert!(MODEL.get_or_init(load_model).is_some(), "model feature names must match the Rust lists");
+    }
 }
