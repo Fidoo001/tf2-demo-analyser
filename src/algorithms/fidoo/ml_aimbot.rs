@@ -75,14 +75,14 @@ const NEAR: usize = 29;
 const ACQ: usize = 7;
 /// Hit features that are aggregated into the player features (all but the context `dist` and `lag`)
 const AGGREGATED: usize = NEAR + ACQ;
-const IDX_ERR0_REL: usize = 1;
-const IDX_STEP_HIT: usize = 11;
-const IDX_STILLNESS: usize = 13;
-const IDX_JERK: usize = 19;
-const IDX_ACQ_STEP: usize = 30;
-const IDX_ACQ_T: usize = 33;
-const IDX_DIST: usize = AGGREGATED;
-const IDX_LAG: usize = AGGREGATED + 1;
+pub const IDX_ERR0_REL: usize = 1;
+pub const IDX_STEP_HIT: usize = 11;
+pub const IDX_STILLNESS: usize = 13;
+pub const IDX_JERK: usize = 19;
+pub const IDX_ACQ_STEP: usize = 30;
+pub const IDX_ACQ_T: usize = 33;
+pub const IDX_DIST: usize = AGGREGATED;
+pub const IDX_LAG: usize = AGGREGATED + 1;
 
 /// Player feature names: `<hit feature>_med`, `_p10`, `_p90` for the aggregated hit features, then the
 /// snap and precise shares
@@ -187,6 +187,26 @@ impl Booster {
 struct Model {
     unit: Booster,
     hit: Booster,
+    /// Evidence weighting (scripts/ml_aimbot_train.py `shrink`): the player score is pulled towards `prior` on the
+    /// logit scale by min(1, hits / full_hits), so a few aimbot-like hits cannot give a high score
+    #[serde(default)]
+    prior: Option<f64>,
+    #[serde(default)]
+    full_hits: Option<f64>,
+}
+
+impl Model {
+    fn player_score(&self, features: &[f32], hits: usize) -> f32 {
+        let p = f64::from(self.unit.probability(features));
+        let (Some(prior), Some(full)) = (self.prior, self.full_hits.filter(|f| *f > 0.0)) else { return p as f32 };
+        let logit = |q: f64| {
+            let q = q.clamp(1e-9, 1.0 - 1e-9);
+            (q / (1.0 - q)).ln()
+        };
+        let z0 = logit(prior);
+        let z = z0 + (logit(p) - z0) * (hits as f64 / full).min(1.0);
+        (1.0 / (1.0 + (-z).exp())) as f32
+    }
 }
 
 fn model() -> Option<&'static Model> {
@@ -197,6 +217,12 @@ fn model() -> Option<&'static Model> {
             (model.unit.features == unit_feature_names() && model.hit.features == hit_names).then_some(model)
         })
         .as_ref()
+}
+
+/// Per-hit model probability of a hit's features (`HitRecord::features`), `None` without a model. fidoo/plain_aimbot
+/// uses it to flag single hits.
+pub fn hit_probability(features: &[f32]) -> Option<f32> {
+    model().map(|m| m.hit.probability(features))
 }
 
 /// Same exclusions as fidoo/plain_aimbot (excluded and projectile weapons) plus melee and other non-guns
@@ -534,7 +560,7 @@ impl MlAimbot {
         Self {
             params: Parameters::from([
                 ("enabled".to_string(), Parameter::Bool(true)),
-                ("min_score".to_string(), Parameter::Float(0.7)),
+                ("min_score".to_string(), Parameter::Float(0.33)),
                 ("min_hits".to_string(), Parameter::Int(5)),
                 ("max_detections".to_string(), Parameter::Int(3)),
             ]),
@@ -547,6 +573,11 @@ impl MlAimbot {
             hits: Vec::new(),
             units: Vec::new(),
         }
+    }
+
+    /// Evaluates every pending hit into `hits` (end of the demo), for users of the hit features outside `finish`
+    pub fn flush_pending(&mut self) {
+        self.flush(u32::MAX, true);
     }
 
     /// Evaluates the pending hits whose window has passed (all of them when `all`)
@@ -707,7 +738,7 @@ impl<'a> CheatAlgorithm<'a> for MlAimbot {
                 continue;
             }
             let features = unit_features(&hits);
-            let score = model.map_or(f32::NAN, |m| m.unit.probability(&features));
+            let score = model.map_or(f32::NAN, |m| m.player_score(&features, hits.len()));
             self.units.push(UnitRecord { player, n_hits: hits.len(), features, score });
             if !(score >= min_score) {
                 continue;
@@ -767,6 +798,20 @@ mod tests {
         assert!(f[3] < 0.01, "{f:?}");
         assert_eq!(f[4], 40.0);
         assert!(f[5] < 0.01 && f[6] < 0.01, "{f:?}");
+    }
+
+    #[test]
+    fn few_hits_pull_the_score_towards_the_prior() {
+        let empty = || Booster { features: Vec::new(), trees: Vec::new() };
+        let m = Model { unit: empty(), hit: empty(), prior: Some(0.1), full_hits: Some(15.0) };
+        assert!((m.player_score(&[], 15) - 0.5).abs() < 1e-6);
+        assert!((m.player_score(&[], 40) - 0.5).abs() < 1e-6);
+        assert!((m.player_score(&[], 0) - 0.1).abs() < 1e-6);
+        // a third of the evidence: a third of the way from the prior's logit to the model's
+        let z = (0.1f64 / 0.9).ln() * (2.0 / 3.0);
+        assert!((f64::from(m.player_score(&[], 5)) - 1.0 / (1.0 + (-z).exp())).abs() < 1e-6);
+        let unweighted = Model { unit: empty(), hit: empty(), prior: None, full_hits: None };
+        assert!((unweighted.player_score(&[], 1) - 0.5).abs() < 1e-6);
     }
 
     #[test]

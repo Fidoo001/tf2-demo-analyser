@@ -457,6 +457,11 @@ pub struct PacketInfo {
     /// The recording client's real engine view (pitch, yaw) from the packet's command info. The usercmd
     /// angles can differ from it (silent aim writes them only on the shot cmd).
     pub client_view_angles: [f32; 2],
+    /// The recording client's netchannel state when the packet was recorded: the last received
+    /// server sequence (m_nInSequenceNr) and the server's ack of the client's own outgoing sequence
+    /// (m_nOutSequenceNrAck). A usercmd's header number is the outgoing sequence it was sent with.
+    pub sequence_in: u32,
+    pub sequence_out: u32,
 }
 
 #[derive(Serialize, Deserialize, Clone)]

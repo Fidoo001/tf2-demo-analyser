@@ -886,7 +886,7 @@ impl MlSilentAim {
         Self {
             params: Parameters::from([
                 ("enabled".to_string(), Parameter::Bool(true)),
-                ("min_score".to_string(), Parameter::Float(0.83)),
+                ("min_score".to_string(), Parameter::Float(0.72)),
                 ("min_hits".to_string(), Parameter::Int(3)),
                 ("min_shot_score".to_string(), Parameter::Float(0.65)),
                 ("max_detections".to_string(), Parameter::Int(20)),

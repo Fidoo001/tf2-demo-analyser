@@ -143,6 +143,8 @@ impl<'a, T: DemoHandlerAnalyser> CheatDemoHandler<'a, T> {
                         packet.meta.view_angles[0].angles.x,
                         packet.meta.view_angles[0].angles.y,
                     ],
+                    sequence_in: packet.meta.sequence_in,
+                    sequence_out: packet.meta.sequence_out,
                 });
             }
             Packet::UserCmd(packet) => {

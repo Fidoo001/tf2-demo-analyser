@@ -20,7 +20,10 @@ const TICK_INTERVAL: f32 = 0.015; // 66.67 Hz standard Source engine tick interv
 struct PlayerCrouchSpeedState {
     prev_pos: Option<Vector>,
     last_sample_pos: Option<Vector>,
-    last_sample_tick: u32,
+    /// Player sim tick of the last position sample (timing source for speed)
+    last_sample_sim: i64,
+    /// Server tick of the last position sample (stationary timeout)
+    last_sample_server_tick: u32,
     current_speed_hu_s: f32,
     vertical_speed_hu_s: f32,
     consecutive_ticks: u32,
@@ -208,10 +211,17 @@ impl<'a> CheatAlgorithm<'a> for CrouchSpeed {
             pstate.pvs_ticks += 1;
 
             // Wait at least 4 ticks after entering PVS to establish valid position deltas
+            // Time is measured in the player's sim ticks (server ticks as fallback), never in demo
+            // ticks: a recorder stall delivers many server ticks of packets on one demo tick, which
+            // would divide every position step by a single tick and double the measured speed.
+            let sim = state.sim_tick(player);
+            let server_tick = state.server_tick;
+
             if pstate.pvs_ticks < 4 {
                 pstate.prev_pos = Some(player.position);
                 pstate.last_sample_pos = Some(player.position);
-                pstate.last_sample_tick = ticknum;
+                pstate.last_sample_sim = sim;
+                pstate.last_sample_server_tick = server_tick;
                 continue;
             }
 
@@ -228,10 +238,12 @@ impl<'a> CheatAlgorithm<'a> for CrouchSpeed {
             let moved = (dx * dx + dy * dy) > 0.001 || dz.abs() > 0.001;
 
             if moved {
-                let tick_delta = if pstate.last_sample_tick > 0 {
-                    (ticknum - pstate.last_sample_tick).max(1)
+                let sim_delta = sim - pstate.last_sample_sim;
+                let tick_delta = if sim_delta > 0 {
+                    sim_delta as u32
                 } else {
-                    1
+                    // Moved without a new simtime (parented / pushed): fall back to server ticks
+                    server_tick.saturating_sub(pstate.last_sample_server_tick).max(1)
                 };
 
                 if let Some(last_sample) = pstate.last_sample_pos {
@@ -245,8 +257,9 @@ impl<'a> CheatAlgorithm<'a> for CrouchSpeed {
                 }
 
                 pstate.last_sample_pos = Some(player.position);
-                pstate.last_sample_tick = ticknum;
-            } else if ticknum.saturating_sub(pstate.last_sample_tick) > 4 {
+                pstate.last_sample_sim = sim;
+                pstate.last_sample_server_tick = server_tick;
+            } else if server_tick.saturating_sub(pstate.last_sample_server_tick) > 4 {
                 // If no position packet has arrived for > 4 ticks (60ms), entity is stationary
                 pstate.current_speed_hu_s = 0.0;
                 pstate.vertical_speed_hu_s = 0.0;

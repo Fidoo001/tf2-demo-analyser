@@ -93,6 +93,28 @@ const IDX_STILLNESS: usize = 13;
 const IDX_JERK: usize = 14;
 const IDX_CS_DETECTED: usize = 19;
 const IDX_REACTION_TICKS: usize = 20;
+/// step_event, step_pre_med, stillness, jerk, max_step_pre, post_step
+const KINEMATIC: std::ops::RangeInclusive<usize> = 11..=16;
+const IDX_POST_STEP: usize = 16;
+/// The event model sees the view kinematics only for shots within this many target widths of the lead, or
+/// whose view stops after the shot (post_step <= KINEMATIC_HOLD_STEP, deg / sim tick: an aimbot snap holds,
+/// and the cheat's aim point is often a few widths from our lead estimate). A fast flick that misses the
+/// lead and keeps turning through the shot is high-sensitivity style, not aimbot evidence.
+const KINEMATIC_GATE_REL: f32 = 1.5;
+const KINEMATIC_HOLD_STEP: f32 = 4.0;
+
+/// Event model input: the aggregated features, with the kinematics blanked (NaN) on flicks through the shot
+/// that miss the lead
+fn event_model_input(features: &[f32]) -> [f32; AGGREGATED] {
+    let mut x = [0.0f32; AGGREGATED];
+    x.copy_from_slice(&features[..AGGREGATED]);
+    if features[IDX_ERR_LEAD_REL] > KINEMATIC_GATE_REL && !(features[IDX_POST_STEP] <= KINEMATIC_HOLD_STEP) {
+        for i in KINEMATIC {
+            x[i] = f32::NAN;
+        }
+    }
+    x
+}
 
 pub fn unit_feature_names() -> Vec<String> {
     let mut names = Vec::new();
@@ -934,7 +956,7 @@ impl<'a> CheatAlgorithm<'a> for MlPlainProjectile {
         let model = MODEL.get_or_init(load_model);
         // every event is scored by the event model; the unit model uses aggregates of these scores
         for ev in &mut self.events {
-            ev.score = model.as_ref().map_or(f32::NAN, |m| m.event.predict(&ev.features[..AGGREGATED]));
+            ev.score = model.as_ref().map_or(f32::NAN, |m| m.event.predict(&event_model_input(&ev.features)));
         }
 
         for (&player, event_indices) in &by_player {
@@ -1214,6 +1236,21 @@ mod tests {
     fn feature_name_counts() {
         assert_eq!(unit_feature_names().len(), AGGREGATED * 3 + 5 + 6);
         assert_eq!(event_model_feature_names().len(), AGGREGATED);
+    }
+
+    #[test]
+    fn kinematics_gated_off_lead() {
+        assert_eq!(EVENT_FEATURES[*KINEMATIC.start()], "step_event");
+        assert_eq!(EVENT_FEATURES[*KINEMATIC.end()], "post_step");
+        let mut f = [1.0f32; EVENT_FEATURES.len()];
+        f[IDX_ERR_LEAD_REL] = KINEMATIC_GATE_REL;
+        assert_eq!(event_model_input(&f), f[..AGGREGATED], "on the lead: unchanged");
+        f[IDX_ERR_LEAD_REL] = 3.0;
+        assert_eq!(event_model_input(&f), f[..AGGREGATED], "off the lead but the view holds: unchanged");
+        f[IDX_POST_STEP] = KINEMATIC_HOLD_STEP + 1.0;
+        let x = event_model_input(&f);
+        assert!(KINEMATIC.all(|i| x[i].is_nan()));
+        assert!((0..AGGREGATED).filter(|i| !KINEMATIC.contains(i)).all(|i| !x[i].is_nan()));
     }
 
     #[test]

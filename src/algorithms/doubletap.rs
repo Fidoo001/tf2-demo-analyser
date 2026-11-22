@@ -12,15 +12,18 @@
 //    together than the refire interval are impossible, and so are two shots inside ONE snapshot.
 //  * Auto (SMG, pistols, syringe gun): one event per shot, faster than a snapshot, so intervals prove
 //    nothing. Shots inside a rolling window may not exceed what the weapon can fire in that time.
-//  * Minigun: about ONE EVENT PER TICK while firing (1.14 on average), not per shot, so a snapshot may not hold many
-//    more events than the ticks that elapsed since the previous snapshot. A lag catch-up (simulation time jumping)
-//    explains that many extra events, so only bursts the simulation clock cannot account for are flagged.
+//  * Minigun: about ONE EVENT PER TICK while firing (1.14 on average), not per shot. Events may reach the recorder
+//    late and in batches (one batch can hold 10+ ticks worth of a player's events, sometimes split over two
+//    messages), so a delivery is compared with the time since an EARLIER DELIVERY of that player's events, not
+//    with the time since the previous snapshot. A delivery is flagged only when no trailing window (back to an
+//    earlier delivery, at most `minigun_window_ticks`, never before the minigun started firing) explains its
+//    events. A lag catch-up (simulation time jumping) also explains extra events.
 use std::collections::{HashMap, VecDeque};
 
 use anyhow::Error;
 use serde_json::{json, Map, Value};
 use steamid_ng::SteamID;
-use tf_demo_parser::demo::message::packetentities::EntityId;
+use tf_demo_parser::demo::message::packetentities::{EntityId, UpdateType};
 use tf_demo_parser::demo::message::Message;
 use tf_demo_parser::demo::sendprop::SendPropIdentifier;
 use tf_demo_parser::{MessageType, ParserState};
@@ -35,6 +38,9 @@ const TICKS_PER_SECOND: f32 = 66.67;
 /// Attack events a firing minigun emits per tick of simulated time (measured on real demos: median 1.14, 99th percentile
 /// 1.21 over 33-tick windows). It emits about one event per tick, not one per shot, and slightly more than one.
 const MINIGUN_EVENTS_PER_TICK: f32 = 1.2;
+/// `m_iWeaponState` of a minigun that is firing (AC_STATE_FIRING). Attack events are only emitted in this state.
+const MINIGUN_FIRING: i64 = 2;
+const MINIGUN_STATE: SendPropIdentifier = SendPropIdentifier::new("DT_WeaponMinigun", "m_iWeaponState");
 /// Conditions that change fire rate or movement (Mannpower runes, Halloween spells): never judged.
 const IGNORED_CONDS: [u32; 7] = [34, 72, 81, 91, 96, 109, 113];
 /// Player confidence is a logistic curve over the evidence score, centered at `CONF_MID`.
@@ -184,6 +190,12 @@ pub struct DoubleTap {
     cond_until: HashMap<u64, u32>,
     /// auto weapons: event ticks inside the rolling window, and the tick the next rate flag is allowed
     auto_events: HashMap<(u64, usize), (VecDeque<u32>, u32)>,
+    /// recent deliveries (tick, attack events) per (player, weapon entity), newest last
+    deliveries: HashMap<(u64, usize), VecDeque<(u32, u32)>>,
+    /// latest networked `m_iWeaponState` per minigun entity
+    minigun_state: HashMap<usize, i64>,
+    /// per minigun entity: (tick, server ticks covered) of the recent snapshots in which it was firing
+    firing_hist: HashMap<usize, VecDeque<(u32, u32)>>,
 }
 
 impl DoubleTap {
@@ -232,6 +244,8 @@ impl DoubleTap {
                 // (real play: 99.9% of snapshots are within 4, and every confirmed doubletap burst was 5 or more)
                 b("minigun_burst", true),
                 i("minigun_excess", 5),
+                // minigun: longest trailing window that may explain a delivery's events (covers late, batched delivery)
+                i("minigun_window_ticks", 20),
             ]),
             ..Default::default()
         }
@@ -271,6 +285,54 @@ fn max_sim_step(hist: &VecDeque<(u32, i64)>, tick: u32) -> i64 {
         prev = Some(sim);
     }
     best
+}
+
+/// Most minigun attack events a window of `ticks` server ticks can legitimately hold (about one per tick, at most
+/// `MINIGUN_EVENTS_PER_TICK`), before the `minigun_excess` slack. For 1-4 ticks this is the tick count itself.
+fn minigun_allowed(ticks: u32) -> u32 {
+    ticks + (ticks as f32 * (MINIGUN_EVENTS_PER_TICK - 1.0)).floor() as u32
+}
+
+/// Server ticks inside the last `ticks` ticks before `tick` during which the minigun was networked as firing.
+/// `None` (state never seen) does not limit anything.
+fn firing_ticks(firing: Option<&VecDeque<(u32, u32)>>, tick: u32, ticks: u32) -> u32 {
+    let Some(hist) = firing else { return ticks };
+    let covered: u32 = hist.iter().rev().take_while(|(t, _)| tick.saturating_sub(*t) < ticks).map(|(_, n)| *n).sum();
+    covered.min(ticks)
+}
+
+/// The trailing window that best explains a minigun delivery of `events` at `tick`: for every earlier delivery
+/// inside `window` ticks, the events delivered after it against the ticks since it, plus the whole window. A window
+/// is only credited with the ticks the minigun spent FIRING inside it (at least the snapshot gap, which is what the
+/// check credited before windows existed): attack events are only emitted while firing, and late delivery only ever
+/// makes events arrive after the state. Tick shifting fires the whole burst while the networked state is still
+/// spinning or idle.
+/// Returns (excess over the allowed events, credited ticks, events in that window) of the best window.
+fn minigun_best_window(prev: &VecDeque<(u32, u32)>, tick: u32, events: u32, gap: u32, window: u32, firing: Option<&VecDeque<(u32, u32)>>) -> (i64, u32, u32) {
+    let mut total = events;
+    let mut best: Option<(i64, u32, u32)> = None;
+    let mut consider = |ticks: u32, total: u32| {
+        let ticks = ticks.min(firing_ticks(firing, tick, ticks).max(gap)).max(1);
+        let excess = total as i64 - minigun_allowed(ticks) as i64;
+        if best.map_or(true, |(e, ..)| excess < e) {
+            best = Some((excess, ticks, total));
+        }
+    };
+    for &(t, n) in prev.iter().rev() {
+        let since = tick.saturating_sub(t);
+        if since == 0 {
+            continue;
+        }
+        if since > window {
+            break;
+        }
+        // events delivered after this earlier delivery, against the time since it
+        consider(since, total);
+        total += n;
+    }
+    // everything delivered inside the window (or since the previous delivery if that is older)
+    consider(window, total);
+    best.unwrap_or((events as i64 - minigun_allowed(gap) as i64, gap, events))
 }
 
 impl<'a> CheatAlgorithm<'a> for DoubleTap {
@@ -318,6 +380,18 @@ impl<'a> CheatAlgorithm<'a> for DoubleTap {
             }
         }
 
+        let history = get_parameter_value::<i32>(&self.params, "minigun_window_ticks").max(1) as u32 + 2;
+        self.firing_hist.retain(|ent, _| self.minigun_state.contains_key(ent));
+        for (&ent, &st) in &self.minigun_state {
+            let hist = self.firing_hist.entry(ent).or_default();
+            if st == MINIGUN_FIRING {
+                hist.push_back((tick, gap));
+            }
+            while hist.front().is_some_and(|(t, _)| tick.saturating_sub(*t) > history) {
+                hist.pop_front();
+            }
+        }
+
         if self.pending.is_empty() {
             return Ok(vec![]);
         }
@@ -329,8 +403,15 @@ impl<'a> CheatAlgorithm<'a> for DoubleTap {
         let int = |n: &str| get_parameter_value::<i32>(params, n).max(0) as u32;
         let flt = |n: &str| get_parameter_value::<f32>(params, n);
         let flag = |n: &str| get_parameter_value::<bool>(params, n);
-        let (switch_guard, tolerance, auto_window, auto_slack, minigun_excess, pvs_grace) =
-            (int("switch_guard_ticks"), int("tolerance_ticks"), int("auto_window_ticks").max(1), int("auto_slack"), int("minigun_excess").max(1), int("pvs_grace_ticks"));
+        let (switch_guard, tolerance, auto_window, auto_slack, minigun_excess, pvs_grace, minigun_window) = (
+            int("switch_guard_ticks"),
+            int("tolerance_ticks"),
+            int("auto_window_ticks").max(1),
+            int("auto_slack"),
+            int("minigun_excess").max(1),
+            int("pvs_grace_ticks"),
+            int("minigun_window_ticks").max(1),
+        );
         let (same_frame_on, auto_rate, minigun_burst, lag_excuse) =
             (flag("same_frame"), flag("auto_rate"), flag("minigun_burst"), flag("lag_excuse"));
         let (same_frame_ratio, max_floor_ratio, lag_excuse_ratio) = (flt("same_frame_ratio"), flt("max_floor_ratio"), flt("lag_excuse_ratio"));
@@ -343,6 +424,16 @@ impl<'a> CheatAlgorithm<'a> for DoubleTap {
 
         for (key @ (sid, weapon_ent), (first_idx, events)) in counts {
             let shot = &pending[first_idx];
+            // every delivery is remembered, also the ones not judged below: a later batch is timed against it
+            let prev_deliveries = {
+                let dq = self.deliveries.entry(key).or_default();
+                while dq.front().is_some_and(|(t, _)| tick.saturating_sub(*t) > minigun_window) {
+                    dq.pop_front();
+                }
+                let prev = dq.clone();
+                dq.push_back((tick, events));
+                prev
+            };
             // players out of sight or dead have a stale weapon and position, and ignored conditions change fire rates
             if self.ok_since.get(&sid).map_or(true, |s| tick.saturating_sub(*s) < pvs_grace) || self.cond_until.get(&sid).is_some_and(|u| tick <= *u) {
                 continue;
@@ -370,9 +461,16 @@ impl<'a> CheatAlgorithm<'a> for DoubleTap {
 
             // (type, interval, shots reported, refire time missing in ticks)
             let mut hit: Option<(&str, u32, u32, f32)> = None;
+            // minigun: (window ticks, events in the window) of the window that best explains the delivery
+            let mut minigun_window_info = None;
             if profile.kind == Kind::Minigun {
-                if minigun_burst && events >= gap + minigun_excess {
-                    hit = Some(("minigun_burst", gap, events, (events - gap) as f32));
+                if minigun_burst {
+                    let firing = self.firing_hist.get(&weapon_ent);
+                    let (excess, ticks, total) = minigun_best_window(&prev_deliveries, tick, events, gap, minigun_window, firing);
+                    if excess >= minigun_excess as i64 {
+                        hit = Some(("minigun_burst", ticks, events, (total - minigun_allowed(ticks)) as f32));
+                        minigun_window_info = Some((ticks, total));
+                    }
                 }
             } else {
                 if same_frame_on && shots >= 2 && (gap as f32) < (shots - 1) as f32 * floor as f32 * same_frame_ratio {
@@ -420,8 +518,10 @@ impl<'a> CheatAlgorithm<'a> for DoubleTap {
             let excused = if kind == "minigun_burst" {
                 // the minigun emits events per tick of simulated time, so a catch-up of `sim_gap` ticks legitimately holds
                 // that many events (at the measured rate), however few ticks passed between snapshots
-                let legit = (MINIGUN_EVENTS_PER_TICK * (gap as f32).max(sim_gap as f32 / lag_excuse_ratio)).ceil() as u32;
-                sim_gap >= 4 && shots_reported <= legit
+                // (a catch-up explains the delivery's own events; the earlier events of its window are excused with it)
+                let legit = |ticks: u32| (MINIGUN_EVENTS_PER_TICK * (ticks as f32).max(sim_gap as f32 / lag_excuse_ratio)).ceil() as u32;
+                let (ticks, total) = minigun_window_info.unwrap_or((gap, shots_reported));
+                sim_gap >= 4 && (shots_reported <= legit(gap) || total <= legit(ticks))
             } else {
                 sim_gap >= ((missing * lag_excuse_ratio) as i64).max(4)
             };
@@ -438,8 +538,12 @@ impl<'a> CheatAlgorithm<'a> for DoubleTap {
             push_key(&mut data, "server_ticks", json!(interval));
             push_key(&mut data, "min_server_ticks", json!(floor));
             if kind != "short_interval" {
-                // events in the window for rate, in the snapshot for minigun_burst
+                // events in the window for rate, in the delivery for minigun_burst
                 push_key(&mut data, "shots", json!(shots_reported));
+            }
+            if let Some((_, total)) = minigun_window_info {
+                // events delivered inside the window that explains the delivery best (server_ticks long)
+                push_key(&mut data, "window_shots", json!(total));
             }
             push_key(&mut data, "ping_ms", json!(shot.ping));
             self.buffered.push((Detection { tick: demo_tick, algorithm: self.algorithm_name().to_string(), player: sid, data }, weight));
@@ -448,7 +552,7 @@ impl<'a> CheatAlgorithm<'a> for DoubleTap {
     }
 
     fn handled_messages(&self) -> Result<Vec<MessageType>, bool> {
-        Ok(vec![MessageType::TempEntities])
+        Ok(vec![MessageType::TempEntities, MessageType::PacketEntities])
     }
 
     fn on_message(
@@ -458,6 +562,36 @@ impl<'a> CheatAlgorithm<'a> for DoubleTap {
         parser_state: &ParserState,
         _: tf_demo_parser::demo::data::DemoTick,
     ) -> Result<Vec<Detection>, Error> {
+        if let Message::PacketEntities(msg) = message {
+            // minigun firing state: attack events cannot be older than the tick the minigun started firing
+            for entity in &msg.entities {
+                let ent = usize::from(entity.entity_index);
+                match entity.update_type {
+                    UpdateType::Delete | UpdateType::Leave => {
+                        self.minigun_state.remove(&ent);
+                    }
+                    UpdateType::Enter => {
+                        let is_minigun = parser_state
+                            .server_classes
+                            .get(usize::from(entity.server_class))
+                            .is_some_and(|c| c.name.as_str() == "CTFMinigun");
+                        if is_minigun {
+                            // entering entities are merged with their baseline, so the state is always known
+                            let v = entity.props(parser_state).find(|p| p.identifier == MINIGUN_STATE).and_then(|p| i64::try_from(&p.value).ok());
+                            self.minigun_state.insert(ent, v.unwrap_or(0));
+                        }
+                    }
+                    // only miniguns (registered when they entered) are scanned, the state is only sent when it changes
+                    _ if self.minigun_state.contains_key(&ent) => {
+                        if let Some(v) = entity.props.iter().find(|p| p.identifier == MINIGUN_STATE).and_then(|p| i64::try_from(&p.value).ok()) {
+                            self.minigun_state.insert(ent, v);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            return Ok(vec![]);
+        }
         for (sid, entid) in te_attackers(message, parser_state, state) {
             let Some(player) = state.players.iter().find(|p| p.entity == entid) else {
                 continue;

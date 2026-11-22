@@ -74,6 +74,8 @@ const EYE_REST_TICKS: i32 = 6;
 const EYE_MAX_GAP: u32 = 3;
 /// A snap that has neither returned nor moved on by this tick is treated as held.
 const HOLD_TICKS: i32 = 2;
+/// Updates smaller than this fraction of a snap have no meaningful direction.
+const DIRECTION_MIN_MOVE: f32 = 0.1;
 /// TF_DMG_CUSTOM_HEADSHOT, TF_DMG_CUSTOM_HEADSHOT_DECAPITATION
 const HEADSHOT_CUSTOMS: [u16; 2] = [1, 51];
 /// The Sydney Sleeper has no headshot damage type, but its scoped headshots always mini-crit
@@ -132,20 +134,6 @@ const DOT_SHOWS_FIRED_DEGREES: f32 = 0.02;
 const FLICK_MAX_GAP: i32 = 3;
 /// Rewinds tried for a head match on misses, whole ticks.
 const MISS_MAX_REWIND: i32 = 30;
-/// Rewinds tried for confirmed headshots, whole ticks. Lag compensation rewinds to a whole server tick
-/// (`cmd->tick_count - lerp ticks`), so fractional rewinds only matter between sparse records.
-const HEADSHOT_MAX_REWIND: usize = 30;
-/// Ticks around the typical rewind that count as the typical rewind.
-const TYPICAL_REWIND_WINDOW: usize = 2;
-/// A rewind explains a headshot when the hit point lies this close to the head centre, HU (3D, after
-/// moving the hit point `HIT_SURFACE_DEPTH` into the head).
-const HEAD_MATCH: f32 = 8.0;
-/// The blood hit point is the bullet's entry into the head hitbox; the centre lies about this far further
-/// along the ray, HU.
-const HIT_SURFACE_DEPTH: f32 = 3.0;
-/// Records over which the victim's speed at the shot is measured.
-const SPEED_RECORDS: usize = 5;
-
 #[derive(Clone, Copy, Debug)]
 struct Snap {
     tick: u32,
@@ -208,20 +196,10 @@ struct Flick {
     /// Jump in degrees and the distance of the fired aim.
     jump_degrees: f32,
     distance: f32,
-}
-
-/// A confirmed headshot on a moving victim with how far the exact hit point lies from the head per rewind.
-#[derive(Clone, Debug)]
-struct HeadshotRewind {
-    player: u64,
-    tick: u32,
-    target: Option<u64>,
-    weapon: String,
-    ping_ticks: f32,
-    distance: f32,
-    /// Hit point (moved `HIT_SURFACE_DEPTH` into the head) to head centre, HU, per whole tick of rewind
-    /// (INFINITY = no record)
-    errors: Vec<f32>,
+    /// Cosine between the jump and the last update before it (1 = the jump carries on the preceding
+    /// motion), and between the jump and the way on after the shot (1 = follow-through).
+    pre_cos: f32,
+    post_cos: f32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -281,6 +259,12 @@ struct SnapEvent {
     eye_angle: f32,
     gap_ticks: i32,
     distance: f32,
+    /// Movement of the next moved update from the shot aim (fraction of the snap), and the cosine between
+    /// it and the snap (1 = the aim carries on in the snap direction).
+    post_move: f32,
+    post_cos: f32,
+    /// Cosine between the snap and the last preceding update (1 = the snap carries on the preceding motion).
+    pre_cos: f32,
 }
 
 /// Out-and-back jump of the update right after the shot.
@@ -327,6 +311,10 @@ fn len2(v: (f32, f32)) -> f32 {
 
 fn sub2(a: (f32, f32), b: (f32, f32)) -> (f32, f32) {
     (a.0 - b.0, a.1 - b.1)
+}
+
+fn cosine(a: (f32, f32), b: (f32, f32)) -> f32 {
+    (a.0 * b.0 + a.1 * b.1) / (len2(a) * len2(b)).max(1e-12)
 }
 
 /// TF_WEAPON_SNIPERRIFLE, TF_WEAPON_SNIPERRIFLE_DECAP, TF_WEAPON_SNIPERRIFLE_CLASSIC.
@@ -429,40 +417,6 @@ fn segment_distance(p: (f32, f32), a: (f32, f32), b: (f32, f32)) -> f32 {
     len2(sub2(p, (a.0 + ab.0 * t, a.1 + ab.1 * t)))
 }
 
-/// Typical lag offset (rewind minus ping, ticks) of a player: the median over the headshots whose best
-/// rewind explains the hit, `None` with fewer than `min_headshots` of them.
-fn typical_lag_offset(shots: &[&HeadshotRewind], min_headshots: usize) -> Option<f32> {
-    let mut offsets: Vec<f32> = shots
-        .iter()
-        .filter_map(|s| best_rewind(s).filter(|&(_, e)| e <= HEAD_MATCH).map(|(r, _)| r - s.ping_ticks))
-        .collect();
-    if offsets.len() < min_headshots.max(1) {
-        return None;
-    }
-    offsets.sort_unstable_by(f32::total_cmp);
-    let n = offsets.len();
-    Some(if n % 2 == 1 { offsets[n / 2] } else { (offsets[n / 2 - 1] + offsets[n / 2]) / 2.0 })
-}
-
-/// Smallest error within `TYPICAL_REWIND_WINDOW` ticks of `rewind`.
-fn error_near(shot: &HeadshotRewind, rewind: f32) -> Option<f32> {
-    let centre = rewind.round().clamp(0.0, HEADSHOT_MAX_REWIND as f32) as usize;
-    let lo = centre.saturating_sub(TYPICAL_REWIND_WINDOW);
-    let hi = (centre + TYPICAL_REWIND_WINDOW).min(shot.errors.len().saturating_sub(1));
-    shot.errors.get(lo..=hi)?.iter().copied().filter(|e| e.is_finite()).reduce(f32::min)
-}
-
-/// Best rewind of a headshot (whole ticks) and the hit point to head distance there.
-fn best_rewind(shot: &HeadshotRewind) -> Option<(f32, f32)> {
-    let mut best = None;
-    for (i, &e) in shot.errors.iter().enumerate() {
-        if e.is_finite() && best.is_none_or(|(_, b)| e < b) {
-            best = Some((i as f32, e));
-        }
-    }
-    best
-}
-
 /// Distance of `cur` from the straight, time-interpolated path from `prev` to `next`, and the length of
 /// that path.
 fn path_deviation(prev: &Update, cur: &Update, next: &Update) -> (f32, f32) {
@@ -503,7 +457,6 @@ pub struct SniperAim {
     bloods: VecDeque<(u32, u32, [f32; 3])>,
     /// Newest simulation tick of any player per demo tick
     server_ticks: VecDeque<(u32, i64)>,
-    rewinds: Vec<HeadshotRewind>,
     /// Shots that already have a detection
     reported: HashSet<(u64, u32)>,
     /// Silent flicks too small to flag anyone, reported when the player is flagged
@@ -529,6 +482,7 @@ impl SniperAim {
                 ("max_snap_degrees".to_string(), Parameter::Float(10.0)),
                 ("held_min_ratio".to_string(), Parameter::Float(3.5)),
                 ("held_min_stay".to_string(), Parameter::Float(0.6)),
+                ("held_max_direction_cos".to_string(), Parameter::Float(0.5)),
                 ("check_silent".to_string(), Parameter::Bool(true)),
                 ("silent_min_ratio".to_string(), Parameter::Float(3.0)),
                 ("silent_max_return".to_string(), Parameter::Float(0.4)),
@@ -545,26 +499,22 @@ impl SniperAim {
                 ("check_flick".to_string(), Parameter::Bool(true)),
                 ("silent_flick_min_impulse".to_string(), Parameter::Float(1.5)),
                 ("silent_flick_max_turn".to_string(), Parameter::Float(-0.85)),
+                ("flick_along_motion_cos".to_string(), Parameter::Float(0.8)),
+                ("flick_along_motion_ratio".to_string(), Parameter::Float(2.0)),
                 ("miss_flick_min_impulse".to_string(), Parameter::Float(3.0)),
                 ("miss_flick_max_head_error".to_string(), Parameter::Float(8.0)),
                 ("plain_flick_min_jump".to_string(), Parameter::Float(3.0)),
                 ("plain_flick_min_ratio".to_string(), Parameter::Float(3.5)),
                 ("plain_flick_large_jump".to_string(), Parameter::Float(6.0)),
                 ("plain_flick_large_ratio".to_string(), Parameter::Float(1.5)),
+                ("plain_flick_max_direction_cos".to_string(), Parameter::Float(0.8)),
                 ("body_flick_min_jump".to_string(), Parameter::Float(5.0)),
                 ("body_flick_min_ratio".to_string(), Parameter::Float(1.5)),
                 ("body_flick_min_rest_ticks".to_string(), Parameter::Int(3)),
-                ("check_backtrack".to_string(), Parameter::Bool(true)),
-                ("backtrack_min_hit_error".to_string(), Parameter::Float(16.0)),
-                ("backtrack_min_rewind_offset".to_string(), Parameter::Float(4.0)),
-                ("backtrack_min_headshots".to_string(), Parameter::Int(4)),
-                ("backtrack_min_victim_speed".to_string(), Parameter::Float(2.5)),
                 ("gated_min_detections".to_string(), Parameter::Int(3)),
                 ("flag_min_detections".to_string(), Parameter::Int(2)),
                 ("flag_window_ticks".to_string(), Parameter::Int(20000)),
                 ("silent_flick_weak_impulse".to_string(), Parameter::Float(1.0)),
-                ("backtrack_weak_min_hit_error".to_string(), Parameter::Float(12.0)),
-                ("backtrack_weak_min_rewind_offset".to_string(), Parameter::Float(3.0)),
             ]),
             history: FxHashMap::default(),
             dots: FxHashMap::default(),
@@ -574,7 +524,6 @@ impl SniperAim {
             heads: FxHashMap::default(),
             bloods: VecDeque::new(),
             server_ticks: VecDeque::new(),
-            rewinds: Vec::new(),
             reported: HashSet::new(),
             weak_flicks: Vec::new(),
             plain_flicks: Vec::new(),
@@ -627,6 +576,7 @@ impl SniperAim {
         let min_dot_distance: f32 = get_parameter_value(&self.params, "min_dot_distance");
         let check_outlier: bool = get_parameter_value(&self.params, "check_silent_outlier");
         let outlier_max_path_ratio: f32 = get_parameter_value(&self.params, "outlier_max_path_ratio");
+        let held_max_direction_cos: f32 = get_parameter_value(&self.params, "held_max_direction_cos");
 
         let (samples, shot, updates) = Self::aim_updates(shot_tick, shooter, dots)?;
         let i0 = updates.iter().position(|u| u.start <= 0 && 0 <= u.end)?;
@@ -694,9 +644,19 @@ impl SniperAim {
                     && Self::eye_confirms(shooter, shot_tick, cur.end, n.start, cos_pitch, len2(sub2(n.pos, cur.pos))).is_some()
             });
 
+        // A human flick keeps moving after the shot, and either carries on the motion before it or follows
+        // through. An aimbot snap points at the head, whatever the player's own mouse was doing, and the aim
+        // stops dead on it when the snap happens to carry on the player's turn. Directions of updates much
+        // smaller than the snap are noise.
+        let pre_cos = if i0 >= 2 { cosine(sub2(prev.pos, updates[i0 - 2].pos), snap_vec) } else { 0.0 };
+        let post_move = next.map_or(0.0, |n| len2(sub2(n.pos, cur.pos)) / angle.max(f32::EPSILON));
+        let post_cos = next.map_or(0.0, |n| cosine(sub2(n.pos, cur.pos), snap_vec));
+        let human_flick = post_move >= DIRECTION_MIN_MOVE
+            && ((pre_cos >= held_max_direction_cos && prior_max >= DIRECTION_MIN_MOVE * angle) || post_cos >= held_max_direction_cos);
+
         let kind = if snap_ok && check_silent && return_ratio <= silent_max_return && angle >= silent_min_ratio * prior_max {
             SnapKind::Silent
-        } else if snap_ok && !rested && headshot && return_ratio >= held_min_stay && angle >= held_min_ratio * prior_max {
+        } else if snap_ok && !rested && headshot && !human_flick && return_ratio >= held_min_stay && angle >= held_min_ratio * prior_max {
             SnapKind::Held
         } else if outlier {
             SnapKind::Outlier
@@ -713,6 +673,9 @@ impl SniperAim {
             eye_angle,
             gap_ticks: gap,
             distance: shot.distance,
+            post_move,
+            post_cos,
+            pre_cos,
         })
     }
 
@@ -855,7 +818,21 @@ impl SniperAim {
             rest_ticks: pre.iter().filter(|(_, pos)| len2(sub2(*pos, p1)) < SAME_AIM_EPSILON).count() as i32,
             jump_degrees: jump,
             distance,
+            pre_cos: if updates.len() >= 2 {
+                cosine(sub2(updates[updates.len() - 1], updates[updates.len() - 2]), (-p1.0, -p1.1))
+            } else {
+                0.0
+            },
+            post_cos: p3.map_or(0.0, |(_, pos)| cosine(pos, (-p1.0, -p1.1))),
         })
+    }
+
+    /// An out-and-back along the direction the aim was already moving, no larger than a few of its
+    /// updates: the fired aim ran ahead of the dot track (update timing), not an aimbot. An aimbot's
+    /// out-and-back points at the head, whatever the mouse was doing.
+    fn along_motion(&self, flick: &Flick) -> bool {
+        flick.pre_cos >= get_parameter_value::<f32>(&self.params, "flick_along_motion_cos")
+            && flick.impulse < get_parameter_value::<f32>(&self.params, "flick_along_motion_ratio") * flick.prior
     }
 
     /// Kind of aimbot flick of a hit, `None` when the aim could be a human's.
@@ -868,7 +845,12 @@ impl SniperAim {
         let min_impulse: f32 = get_parameter_value(&self.params, "silent_flick_min_impulse");
         let max_turn: f32 = get_parameter_value(&self.params, "silent_flick_max_turn");
         if flick.impulse >= min_impulse && flick.turn <= max_turn {
-            return Some("silent_flick");
+            return (!self.along_motion(flick)).then_some("silent_flick");
+        }
+        // A held jump that carries on the preceding motion and follows through after the shot is a flick.
+        let max_cos: f32 = get_parameter_value(&self.params, "plain_flick_max_direction_cos");
+        if flick.pre_cos >= max_cos && flick.post_cos >= max_cos {
+            return None;
         }
         if flick.prior_updates == 0 {
             return None;
@@ -923,7 +905,7 @@ impl SniperAim {
         let max_turn: f32 = get_parameter_value(&self.params, "silent_flick_max_turn");
         let max_angle: f32 = get_parameter_value(&self.params, "max_snap_degrees");
         let min_dot_distance: f32 = get_parameter_value(&self.params, "min_dot_distance");
-        if flick.impulse < min_impulse || flick.turn > max_turn || flick.jump_degrees > max_angle || flick.distance < min_dot_distance {
+        if flick.impulse < min_impulse || flick.turn > max_turn || flick.jump_degrees > max_angle || flick.distance < min_dot_distance || self.along_motion(&flick) {
             return None;
         }
         let fired = dots.iter().find(|(t, _)| *t == shot.tick).map(|(_, d)| *d)?;
@@ -948,45 +930,10 @@ impl SniperAim {
                 "head_error": round2(error),
                 "rewind_ticks": rewind,
                 "distance": flick.distance.round(),
+                "prior_max_update_head_radii": round2(flick.prior),
+                "pre_cos": round2(flick.pre_cos),
+                "post_cos": round2(flick.post_cos),
             }),
-        })
-    }
-
-    /// How far the exact hit point of a confirmed headshot lies from the victim's head per rewind. The
-    /// hit point is a 3D position on the rewound victim, so unlike the distance of the fired ray from the
-    /// head it also pins down the rewind while the victim moves along the ray. Only moving victims say
-    /// anything about the rewind.
-    fn headshot_rewind(&self, shot: &Shot, sid: u64, hit_point: [f32; 3], victim_ent: u32, target: Option<u64>, weapon: &str, ping: u16) -> Option<HeadshotRewind> {
-        let origin = shot.origin?;
-        let dir = unit_towards(origin, hit_point)?;
-        let now = self.server_tick_at(shot.tick)?;
-        let records = self.heads.get(&victim_ent)?;
-        // The head model of ducked players is too coarse for this.
-        let at_shot = records.partition_point(|r| r.sim <= now);
-        if at_shot <= SPEED_RECORDS || records[at_shot - 1].ducking {
-            return None;
-        }
-        let (a, b) = (&records[at_shot - 1 - SPEED_RECORDS], &records[at_shot - 1]);
-        let speed = (b.pos[0] - a.pos[0]).hypot(b.pos[1] - a.pos[1]) / (b.sim - a.sim).max(1) as f32;
-        if speed < get_parameter_value::<f32>(&self.params, "backtrack_min_victim_speed") {
-            return None;
-        }
-        let centre = [
-            hit_point[0] + dir[0] * HIT_SURFACE_DEPTH,
-            hit_point[1] + dir[1] * HIT_SURFACE_DEPTH,
-            hit_point[2] + dir[2] * HIT_SURFACE_DEPTH,
-        ];
-        let errors = (0..=HEADSHOT_MAX_REWIND)
-            .map(|r| head_at(records, (now - r as i64) as f32).map_or(f32::INFINITY, |head| dist(centre, head)))
-            .collect();
-        Some(HeadshotRewind {
-            player: sid,
-            tick: shot.tick,
-            target,
-            weapon: weapon.to_string(),
-            ping_ticks: f32::from(ping) / 15.0,
-            distance: dist(origin, hit_point),
-            errors,
         })
     }
 
@@ -994,8 +941,7 @@ impl SniperAim {
         if !is_rifle(shot.weapon_id) {
             return None;
         }
-        let (detection, rewind, weak) = self.judge_shot(shot, state);
-        self.rewinds.extend(rewind);
+        let (detection, weak) = self.judge_shot(shot, state);
         self.weak_flicks.extend(weak);
         if detection.as_ref().is_some_and(|d| d.data["type"] == "plain_flick") {
             self.plain_flicks.extend(detection);
@@ -1012,26 +958,18 @@ impl SniperAim {
         self.bloods.iter().find(|(t, e, _)| *e == victim_ent && *t >= shot.tick && *t <= shot.tick + 1).map(|(_, _, p)| *p)
     }
 
-    fn judge_shot(&self, shot: Shot, state: &CheatAnalyserState) -> (Option<Detection>, Option<HeadshotRewind>, Option<Detection>) {
-        let Some(info) = self.shot_info(&shot, state) else { return (None, None, None) };
+    fn judge_shot(&self, shot: Shot, state: &CheatAnalyserState) -> (Option<Detection>, Option<Detection>) {
+        let Some(info) = self.shot_info(&shot, state) else { return (None, None) };
         let ShotInfo { shooter, sid, hurt } = info;
         let Some(hurt) = hurt else {
-            return (self.evaluate_miss(shot, shooter, sid, state), None, None);
+            return (self.evaluate_miss(shot, shooter, sid, state), None);
         };
         let victim = state.players.iter().find(|p| p.info.as_ref().is_some_and(|i| u16::from(i.user_id) == hurt.victim_uid));
         let victim_ent = victim.map(|p| u32::from(p.entity));
         let hit_point = victim_ent.and_then(|ent| self.hit_point(&shot, ent));
-        let rewind = if get_parameter_value::<bool>(&self.params, "check_backtrack") && HEADSHOT_CUSTOMS.contains(&hurt.custom) {
-            hit_point.zip(victim_ent).and_then(|(point, ent)| {
-                let target = victim.and_then(|p| player_sid(p, state));
-                self.headshot_rewind(&shot, sid, point, ent, target, &state.get_player_weapon(shooter), shooter.ping)
-            })
-        } else {
-            None
-        };
         let detection = self.evaluate_hit(shot, shooter, sid, &hurt, victim, hit_point, state);
         let weak = if detection.is_none() { self.weak_flick(&shot, shooter, sid, victim, hit_point, state) } else { None };
-        (detection, rewind, weak)
+        (detection, weak)
     }
 
     /// An out-and-back too small to flag anyone on its own.
@@ -1044,7 +982,7 @@ impl SniperAim {
         let min_dot_distance: f32 = get_parameter_value(&self.params, "min_dot_distance");
         let min_impulse: f32 = get_parameter_value(&self.params, "silent_flick_weak_impulse");
         let max_turn: f32 = get_parameter_value(&self.params, "silent_flick_max_turn");
-        if f.jump_degrees > max_angle || f.distance < min_dot_distance || f.impulse < min_impulse || f.turn > max_turn {
+        if f.jump_degrees > max_angle || f.distance < min_dot_distance || f.impulse < min_impulse || f.turn > max_turn || self.along_motion(&f) {
             return None;
         }
         let round2 = |v: f32| (v * 100.0).round() / 100.0;
@@ -1135,6 +1073,8 @@ impl SniperAim {
                             "rest_ticks": f.rest_ticks,
                             "aim_from_hit_point": hit_point.is_some(),
                             "distance": f.distance.round(),
+                            "pre_cos": round2(f.pre_cos),
+                            "post_cos": round2(f.post_cos),
                         }),
                     });
                 }
@@ -1177,6 +1117,9 @@ impl SniperAim {
                 "eye_angle_snap": round2(event.eye_angle),
                 "gap_ticks": event.gap_ticks,
                 "distance": event.distance.round(),
+                "post_move": round2(event.post_move),
+                "pre_cos": round2(event.pre_cos),
+                "post_cos": round2(event.post_cos),
             }),
         })
     }
@@ -1187,13 +1130,13 @@ impl<'a> CheatAlgorithm<'a> for SniperAim {
         "fidoo/sniperaim"
     }
 
-    /// Plain flicks, off-lag headshots and weak flicks are judged per player over all their shots.
+    /// Plain flicks and weak flicks are judged per player over all their shots.
     fn needs_whole_demo(&self) -> bool {
         true
     }
 
     fn tooltip(&self) -> &'static str {
-        "Detects low-FOV Sniper aimbots: silent and plain flicks measured against the exact fired aim, and headshots that only land on a past head position (backtrack)."
+        "Detects low-FOV Sniper aimbots: silent and plain flicks measured against the exact fired aim."
     }
 
     fn params(&mut self) -> Option<&mut Parameters> {
@@ -1213,7 +1156,6 @@ impl<'a> CheatAlgorithm<'a> for SniperAim {
         self.heads.clear();
         self.bloods.clear();
         self.server_ticks.clear();
-        self.rewinds.clear();
         self.reported.clear();
         self.weak_flicks.clear();
         self.plain_flicks.clear();
@@ -1449,70 +1391,15 @@ impl<'a> CheatAlgorithm<'a> for SniperAim {
         Ok(ready.into_iter().filter_map(|shot| self.evaluate_shot(shot, state)).collect())
     }
 
-    /// Everything that needs all of a player's shots: headshots that only land at a rewind far from the
-    /// shooter's typical one, and the kinds that only count for an already flagged player.
+    /// Everything that needs all of a player's shots: the kinds that only count for an already flagged player.
     fn finish(&mut self) -> Result<Vec<Detection>, Error> {
         if !get_parameter_value::<bool>(&self.params, "enabled") {
             return Ok(vec![]);
         }
-        let check_backtrack: bool = get_parameter_value(&self.params, "check_backtrack");
-        let min_error: f32 = get_parameter_value(&self.params, "backtrack_min_hit_error");
-        let min_offset: f32 = get_parameter_value(&self.params, "backtrack_min_rewind_offset");
-        let weak_error: f32 = get_parameter_value(&self.params, "backtrack_weak_min_hit_error");
-        let weak_offset: f32 = get_parameter_value(&self.params, "backtrack_weak_min_rewind_offset");
-        let min_headshots = get_parameter_value::<i32>(&self.params, "backtrack_min_headshots").max(1) as usize;
         let gated_min = get_parameter_value::<i32>(&self.params, "gated_min_detections").max(1) as usize;
         let flag_min = get_parameter_value::<i32>(&self.params, "flag_min_detections").max(1) as usize;
         let flag_window = get_parameter_value::<i32>(&self.params, "flag_window_ticks").max(0) as u32;
-        let mut players: Vec<u64> = self.rewinds.iter().map(|r| r.player).collect();
-        players.sort_unstable();
-        players.dedup();
-        let mut backtrack = Vec::new();
-        let mut weak_backtrack = Vec::new();
-        let round2 = |v: f32| (v * 100.0).round() / 100.0;
-        for player in players.iter().copied().filter(|_| check_backtrack) {
-            let shots: Vec<&HeadshotRewind> = self.rewinds.iter().filter(|r| r.player == player).collect();
-            let Some(lag_offset) = typical_lag_offset(&shots, min_headshots) else { continue };
-            for shot in &shots {
-                if self.reported.contains(&(player, shot.tick)) {
-                    continue;
-                }
-                let Some((rewind, error)) = best_rewind(shot) else { continue };
-                if error > HEAD_MATCH {
-                    continue;
-                }
-                let typical = lag_offset + shot.ping_ticks;
-                let typical_error = error_near(shot, typical).unwrap_or(f32::INFINITY);
-                let offset = (rewind - typical).abs();
-                if !typical_error.is_finite() || typical_error < weak_error || offset < weak_offset {
-                    continue;
-                }
-                let strong = typical_error >= min_error && offset >= min_offset;
-                let detection = Detection {
-                    tick: shot.tick,
-                    algorithm: "fidoo/sniperaim".to_string(),
-                    player,
-                    data: json!({
-                        "type": "backtrack_headshot",
-                        "weak": !strong,
-                        "weapon": shot.weapon,
-                        "headshot": true,
-                        "target": shot.target,
-                        "rewind_ticks": round2(rewind),
-                        "typical_rewind_ticks": round2(typical),
-                        "hit_error": round2(error),
-                        "hit_error_at_typical_rewind": round2(typical_error),
-                        "distance": shot.distance.round(),
-                    }),
-                };
-                if strong {
-                    backtrack.push(detection);
-                } else {
-                    weak_backtrack.push(detection);
-                }
-            }
-        }
-        // Plain flicks and off-lag headshots count from `gated_min` per player, and never pair with another
+        // Plain flicks count from `gated_min` per player, and never pair with another
         // kind. Weak flicks only tell a reviewer more about a player flagged by something else.
         let mut flagged: HashSet<u64> = HashSet::new();
         let mut ticks: HashMap<u64, Vec<u32>> = HashMap::new();
@@ -1526,17 +1413,15 @@ impl<'a> CheatAlgorithm<'a> for SniperAim {
             }
         }
         let plain = std::mem::take(&mut self.plain_flicks);
-        for group in [&plain, &backtrack] {
-            let mut counts: HashMap<u64, usize> = HashMap::new();
-            for d in group {
-                *counts.entry(d.player).or_default() += 1;
-            }
-            flagged.extend(counts.into_iter().filter(|&(_, n)| n >= gated_min).map(|(player, _)| player));
+        let mut counts: HashMap<u64, usize> = HashMap::new();
+        for d in &plain {
+            *counts.entry(d.player).or_default() += 1;
         }
+        flagged.extend(counts.into_iter().filter(|&(_, n)| n >= gated_min).map(|(player, _)| player));
         let weak = std::mem::take(&mut self.weak_flicks);
         let mut detections = Vec::new();
         let mut seen = self.reported.clone();
-        for d in plain.into_iter().chain(backtrack).chain(weak).chain(weak_backtrack) {
+        for d in plain.into_iter().chain(weak) {
             if flagged.contains(&d.player) && seen.insert((d.player, d.tick)) {
                 detections.push(d);
             }
@@ -1604,6 +1489,20 @@ mod tests {
         assert!((event.angle - 1.48).abs() < 0.01);
         // Not a headshot: a held snap needs a headshot.
         assert!(algo.classify(1000, &shooter, &dots, false).is_none());
+    }
+
+    #[test]
+    fn held_snap_carrying_on_a_turn_is_a_flick_unless_it_stops_dead() {
+        // Turning towards the head at 0.1°/tick, a 1.6° update on the shot tick, then the turn goes on.
+        let aim: Vec<(i32, f32)> = (-12..=4)
+            .map(|j| (j, if j < 0 { 1.5 - 0.1 * j as f32 } else if j == 0 { 0.0 } else { -0.3 - 0.1 * j as f32 }))
+            .collect();
+        let (shooter, dots) = dot_track(&aim, 1000);
+        assert!(enabled().classify(1000, &shooter, &dots, true).is_none());
+        // The same snap stopping dead on the head: an aimbot that happened to snap along the turn.
+        let aim: Vec<(i32, f32)> = (-12..=4).map(|j| (j, if j < 0 { 1.5 - 0.1 * j as f32 } else { 0.0 })).collect();
+        let (shooter, dots) = dot_track(&aim, 1000);
+        assert_eq!(enabled().classify(1000, &shooter, &dots, true).map(|e| e.kind), Some(SnapKind::Held));
     }
 
     #[test]
@@ -1773,6 +1672,21 @@ mod tests {
     }
 
     #[test]
+    fn out_and_back_along_a_fast_turn_is_no_silent_flick() {
+        // Turning at 0.3°/tick (1.7 head radii); the fired aim is 0.8° further along the turn than the dot
+        // path, then the dot is back on it: update timing, not an aimbot.
+        let aim: Vec<(i32, f32)> = (-6..=4).map(|j| (j, if j == 0 { 0.0 } else { 0.3 * j as f32 - 0.8 })).collect();
+        let f = flick_of(&aim, Some(0.0)).expect("flick");
+        assert!(f.pre_cos > 0.99 && f.impulse > 2.5 && f.turn < -0.99);
+        assert_eq!(enabled().flick_kind(&f, true), None);
+        // The same out-and-back against the turn.
+        let aim: Vec<(i32, f32)> = (-6..=4).map(|j| (j, if j == 0 { 0.0 } else { 0.3 * j as f32 + 0.8 })).collect();
+        let f = flick_of(&aim, Some(0.0)).expect("flick");
+        assert!(f.pre_cos < -0.99 && f.impulse > 2.5);
+        assert_eq!(enabled().flick_kind(&f, true), Some("silent_flick"));
+    }
+
+    #[test]
     fn sweep_through_the_head_is_no_flick() {
         let aim: Vec<(i32, f32)> = (-6..=4).map(|j| (j, 0.2 * j as f32)).collect();
         let f = flick_of(&aim, Some(0.0)).expect("flick");
@@ -1810,27 +1724,6 @@ mod tests {
         let out = algo.finish().unwrap();
         let of = |p: u64| out.iter().filter(|d| d.player == p).count();
         assert_eq!((of(1), of(2), of(3), of(4)), (0, 3, 0, 1));
-    }
-
-    #[test]
-    fn typical_rewind_comes_from_most_headshots() {
-        let shot = |k: usize| HeadshotRewind {
-            player: 1,
-            tick: 1,
-            target: None,
-            weapon: String::new(),
-            ping_ticks: 2.0,
-            distance: 1000.0,
-            errors: (0..=HEADSHOT_MAX_REWIND).map(|s| if s == k { 1.0 } else { 40.0 }).collect(),
-        };
-        let shots = [shot(12), shot(12), shot(12), shot(25)];
-        let refs: Vec<&HeadshotRewind> = shots.iter().collect();
-        // median of 10, 10, 10, 23
-        assert!((typical_lag_offset(&refs, 4).unwrap() - 10.0).abs() < 0.01);
-        assert!(typical_lag_offset(&refs, 5).is_none());
-        assert_eq!(best_rewind(&shots[3]), Some((25.0, 1.0)));
-        assert_eq!(error_near(&shots[3], 12.0), Some(40.0));
-        assert_eq!(error_near(&shots[3], 23.0), Some(1.0));
     }
 
     #[test]

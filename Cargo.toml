@@ -50,7 +50,9 @@ unsafe-libopus = { version = "0.2.0", optional = true }
 
 [features]
 gui = [ "eframe", "egui", "dep:rfd" ]
-experimental = [ "dep:unsafe-libopus" ]
+experimental = [
+    "dep:unsafe-libopus",
+]
 parallel = [ "dep:rayon" ]
 rcon = [ "gui" ]
 tf2bd = []

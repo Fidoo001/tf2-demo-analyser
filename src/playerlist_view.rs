@@ -897,6 +897,7 @@ impl PlayerlistWindow {
             self.mark_request = mark_request;
         }
 
+
         self.is_open = is_open;
     }
 

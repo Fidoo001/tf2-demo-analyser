@@ -6,113 +6,113 @@
       "source_hash": "669e929a24c210b7"
     },
     "autostrafe": {
-      "ms_per_1k_ticks": 3.000918417650143,
-      "samples": 802,
+      "ms_per_1k_ticks": 33.536758943039175,
+      "samples": 895,
       "source_hash": "d707c9c1efde67ce"
     },
     "doubletap": {
-      "ms_per_1k_ticks": 1.1209668014592102,
-      "samples": 3,
-      "source_hash": "ea21107971870d9b"
+      "ms_per_1k_ticks": 22.155477491324618,
+      "samples": 93,
+      "source_hash": "7379eec22df85b4e"
     },
     "fidoo/auto_backstab": {
-      "ms_per_1k_ticks": 6.8976179998540905,
-      "samples": 647,
+      "ms_per_1k_ticks": 7.111091201982885,
+      "samples": 1073,
       "source_hash": "5386e9129c0de7d5"
     },
     "fidoo/building_aimbot": {
-      "ms_per_1k_ticks": 4.667791510142733,
-      "samples": 5,
+      "ms_per_1k_ticks": 3.6893714799916233,
+      "samples": 338,
       "source_hash": "9b6731f15d34b89d"
     },
     "fidoo/bunnyhop": {
-      "ms_per_1k_ticks": 1.5179880391774359,
-      "samples": 941,
+      "ms_per_1k_ticks": 1.8837874325853183,
+      "samples": 1367,
       "source_hash": "300f0ad61a01c05c"
     },
     "fidoo/duckspeed": {
-      "ms_per_1k_ticks": 1.6427859966686351,
-      "samples": 943,
-      "source_hash": "19a8a1946c6a1e1e"
+      "ms_per_1k_ticks": 2.17230494424342,
+      "samples": 78,
+      "source_hash": "125433b0b8ea9de8"
     },
     "fidoo/invalid_equip_region": {
-      "ms_per_1k_ticks": 4.443124415770611,
-      "samples": 943,
+      "ms_per_1k_ticks": 5.161533186430559,
+      "samples": 1369,
       "source_hash": "661db681bdcdc66f"
     },
     "fidoo/ml_aimbot": {
-      "ms_per_1k_ticks": 3.5648290526274984,
-      "samples": 2,
-      "source_hash": "e33f6a5a67fd8fc9"
+      "ms_per_1k_ticks": 4.2137167738887165,
+      "samples": 94,
+      "source_hash": "64753bbd9d0dd60d"
     },
     "fidoo/ml_autobackstab": {
-      "ms_per_1k_ticks": 2.2287857167680016,
-      "samples": 987,
+      "ms_per_1k_ticks": 2.5472439994037472,
+      "samples": 1413,
       "source_hash": "3e0d61f73d238afa"
     },
     "fidoo/ml_autostrafe": {
-      "ms_per_1k_ticks": 1.7630573484301695,
-      "samples": 644,
+      "ms_per_1k_ticks": 2.358266707013539,
+      "samples": 1070,
       "source_hash": "f68c9be10ffa8c86"
     },
     "fidoo/ml_plain_projectile": {
-      "ms_per_1k_ticks": 5.779439914867453,
-      "samples": 7,
-      "source_hash": "4c332b5e7f0c0379"
+      "ms_per_1k_ticks": 7.205361361654667,
+      "samples": 352,
+      "source_hash": "17406b7fdc4e8fc3"
     },
     "fidoo/ml_psilent": {
-      "ms_per_1k_ticks": 2.3227485933367653,
-      "samples": 944,
+      "ms_per_1k_ticks": 2.465491449231916,
+      "samples": 1398,
       "source_hash": "f4379fd143c78e83"
     },
     "fidoo/ml_silent_aim": {
-      "ms_per_1k_ticks": 9.871604631381961,
-      "samples": 119,
-      "source_hash": "122d441487840caf"
+      "ms_per_1k_ticks": 7.74389273987372,
+      "samples": 15,
+      "source_hash": "a9f3a9204c51f67f"
     },
     "fidoo/ml_triggerbot": {
-      "ms_per_1k_ticks": 0.29800335805636524,
-      "samples": 680,
+      "ms_per_1k_ticks": 0.6325215278387912,
+      "samples": 681,
       "source_hash": "6dd509ad5fa35396"
     },
     "fidoo/nospread": {
-      "ms_per_1k_ticks": 2.4087726749274108,
-      "samples": 943,
-      "source_hash": "6015eba9b7c93c2a"
+      "ms_per_1k_ticks": 6.754468470897866,
+      "samples": 15,
+      "source_hash": "755ff3829a4e9b6e"
     },
     "fidoo/plain_aimbot": {
-      "ms_per_1k_ticks": 15.373870606458755,
-      "samples": 647,
-      "source_hash": "e345ab4d96b3492d"
+      "ms_per_1k_ticks": 25.871608729577872,
+      "samples": 1458,
+      "source_hash": "259f580d85efa240"
     },
     "fidoo/psilent5": {
-      "ms_per_1k_ticks": 5.413413306824621,
-      "samples": 1244,
+      "ms_per_1k_ticks": 6.837034864920389,
+      "samples": 1698,
       "source_hash": "54487db6c6559e7d"
     },
     "fidoo/pyro_aimbot": {
-      "ms_per_1k_ticks": 4.435608890595043,
-      "samples": 943,
+      "ms_per_1k_ticks": 5.426716404771958,
+      "samples": 1369,
       "source_hash": "23b740aee9bb6481"
     },
     "fidoo/silent_aim": {
-      "ms_per_1k_ticks": 6.166522378398235,
-      "samples": 650,
+      "ms_per_1k_ticks": 7.340352412083398,
+      "samples": 1201,
       "source_hash": "1c39577f8b6bfc05"
     },
     "fidoo/sniperaim": {
-      "ms_per_1k_ticks": 1.010700926620481,
-      "samples": 954,
-      "source_hash": "330b47e2c064d8bc"
+      "ms_per_1k_ticks": 1.3533338932974717,
+      "samples": 78,
+      "source_hash": "785212ef804e9c3a"
     },
     "skiesred/oob_pitch": {
-      "ms_per_1k_ticks": 1.8405649983902186,
-      "samples": 945,
+      "ms_per_1k_ticks": 2.3471134695883924,
+      "samples": 1371,
       "source_hash": "f3205f895a27f6c0"
     },
     "viewangles_180degrees": {
-      "ms_per_1k_ticks": 0.6141302924291729,
-      "samples": 647,
+      "ms_per_1k_ticks": 0.7405084016941301,
+      "samples": 1073,
       "source_hash": "25be8ba4ae261562"
     }
   }

@@ -51,7 +51,7 @@ pub struct UserCmd {
 #[derive(Debug, PartialEq, BitRead, BitWrite, Serialize, Deserialize, Clone)]
 pub struct WeaponSelect {
     #[size = 11]
-    select: u16,
+    pub select: u16,
     #[size = 6]
-    subtype: Option<u8>,
+    pub subtype: Option<u8>,
 }
