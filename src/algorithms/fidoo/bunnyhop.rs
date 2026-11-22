@@ -11,6 +11,8 @@ use crate::lib::algorithm::{CheatAlgorithm, Detection};
 use crate::lib::parameters::{get_parameter_value, Parameter, Parameters};
 use crate::util::nocrex::jankguard::JankGuard;
 
+const TICK_INTERVAL: f32 = 0.015; // 66.67 Hz standard Source engine tick interval
+
 #[derive(Default, Clone)]
 struct PlayerBhopState {
     ground_ticks: u32,
@@ -26,9 +28,12 @@ struct PlayerBhopState {
     launch_z: f32,
     apex_z: f32,
     last_pos_sample: Option<Vector>,
-    last_pos_sample_tick: u32,
+    last_sample_sim: Option<i64>,
+    last_sample_server_tick: Option<u32>,
     current_speed_hu_s: f32,
     hop_start_pos: Option<Vector>,
+    hop_start_sim: Option<i64>,
+    hop_start_server_tick: Option<u32>,
     min_x: f32,
     max_x: f32,
     min_y: f32,
@@ -45,6 +50,12 @@ impl PlayerBhopState {
         self.max_x = 0.0;
         self.min_y = 0.0;
         self.max_y = 0.0;
+    }
+
+    fn set_hop_start(&mut self, pos: Vector, sim: Option<i64>, server_tick: u32) {
+        self.hop_start_pos = Some(pos);
+        self.hop_start_sim = sim;
+        self.hop_start_server_tick = Some(server_tick);
     }
 
     fn record_hop(&mut self, pos: Vector) {
@@ -68,11 +79,32 @@ impl PlayerBhopState {
     }
 }
 
+/// Computes elapsed simulation ticks (preferring networked simtime, falling back to server ticks).
+/// Returns `None` if neither clock advanced (e.g. duplicate NetTick).
+fn elapsed_sim_or_server_ticks(
+    curr_sim: Option<i64>,
+    prev_sim: Option<i64>,
+    curr_server_tick: u32,
+    prev_server_tick: Option<u32>,
+) -> Option<u32> {
+    if let (Some(s), Some(prev_s)) = (curr_sim, prev_sim) {
+        if s > prev_s {
+            return Some((s - prev_s) as u32);
+        }
+    }
+    if let Some(prev_st) = prev_server_tick {
+        let delta = curr_server_tick.saturating_sub(prev_st);
+        if delta > 0 {
+            return Some(delta);
+        }
+    }
+    None
+}
+
 pub struct BunnyHop {
     player_states: HashMap<u64, PlayerBhopState>,
     jg: JankGuard,
     params: Parameters,
-    detections: Vec<Detection>,
 }
 
 impl Default for BunnyHop {
@@ -95,7 +127,6 @@ impl BunnyHop {
                 ("min_streak_bbox_diagonal".to_string(), Parameter::Float(100.0)),
                 ("min_hop_distance".to_string(), Parameter::Float(20.0)),
             ]),
-            detections: Vec::new(),
         }
     }
 }
@@ -140,6 +171,11 @@ impl<'a> CheatAlgorithm<'a> for BunnyHop {
     ) -> Result<Vec<Detection>, Error> {
         self.jg.on_tick(state);
         let ticknum = u32::from(state.tick);
+        let server_tick = if state.server_tick != 0 {
+            state.server_tick
+        } else {
+            ticknum
+        };
         let players = &state.players;
 
         let min_streak: i32 = get_parameter_value(&self.params, "min_streak");
@@ -155,20 +191,21 @@ impl<'a> CheatAlgorithm<'a> for BunnyHop {
         let mut tick_detections = Vec::new();
         let algo_name = self.algorithm_name().to_string();
 
-        for player in players.iter().filter(|p| {
-            p.in_pvs
-                && p.state == PlayerState::Alive
-                && p.info.as_ref().is_some_and(|info| info.steam_id != "BOT")
-        }) {
+        for player in players {
             let info = match &player.info {
-                Some(info) => info,
-                None => continue,
+                Some(info) if info.steam_id != "BOT" => info,
+                _ => continue,
             };
 
             let steam_id: u64 = match SteamID::from_steam3(&info.steam_id) {
                 Ok(sid) => u64::from(sid),
                 Err(_) => continue,
             };
+
+            if !player.in_pvs || player.state != PlayerState::Alive {
+                self.player_states.remove(&steam_id);
+                continue;
+            }
 
             let ticks_since_event = self
                 .jg
@@ -189,14 +226,13 @@ impl<'a> CheatAlgorithm<'a> for BunnyHop {
 
             // Stunned, taunting, or special movement conditions (Halloween spells: tiny, ghost, kart, bomb head, etc.)
             if player.is_taunting() || player.is_stunned() || player.has_special_movement_cond() {
-                if let Some(pstate) = self.player_states.get_mut(&steam_id) {
-                    pstate.reset_streak();
-                }
+                self.player_states.remove(&steam_id);
                 continue;
             }
 
             let pstate = self.player_states.entry(steam_id).or_default();
 
+            let sim = state.sim_ticks.get(&player.entity).copied();
             let on_ground = player.is_on_ground();
             let prev_z = pstate.prev_pos.map_or(player.position.z, |p| p.z);
             let dz = player.position.z - prev_z;
@@ -208,25 +244,47 @@ impl<'a> CheatAlgorithm<'a> for BunnyHop {
             };
             let pos_delta_sq = dx * dx + dy * dy;
 
-            // When a position packet arrives, compute accurate speed across update interval
+            // Time is measured in the player's networked sim ticks (server ticks as fallback),
+            // never demo ticks: recorder stalls or packet jitter can pack multiple server ticks
+            // into one demo tick (inflating speed 2x-3x) or stretch one sim tick across multiple
+            // demo ticks (halving speed).
             let pos_updated = dz.abs() > 0.001 || pos_delta_sq > 0.001;
 
-            if pos_updated {
-                let tick_delta = if pstate.last_pos_sample_tick > 0 {
-                    (ticknum - pstate.last_pos_sample_tick).max(1)
-                } else {
-                    1
-                };
-
+            if pstate.last_pos_sample.is_none() {
+                pstate.last_pos_sample = Some(player.position);
+                pstate.last_sample_sim = sim;
+                pstate.last_sample_server_tick = Some(server_tick);
+            } else if pos_updated {
                 if let Some(last_sample) = pstate.last_pos_sample {
-                    let sample_dx = player.position.x - last_sample.x;
-                    let sample_dy = player.position.y - last_sample.y;
-                    let dist = (sample_dx * sample_dx + sample_dy * sample_dy).sqrt();
-                    pstate.current_speed_hu_s = (dist / (tick_delta as f32)) * 66.66667;
+                    if let Some(tick_delta) = elapsed_sim_or_server_ticks(
+                        sim,
+                        pstate.last_sample_sim,
+                        server_tick,
+                        pstate.last_sample_server_tick,
+                    ) {
+                        let sample_dx = player.position.x - last_sample.x;
+                        let sample_dy = player.position.y - last_sample.y;
+                        let dist = (sample_dx * sample_dx + sample_dy * sample_dy).sqrt();
+                        pstate.current_speed_hu_s = dist / (tick_delta as f32 * TICK_INTERVAL);
+                    }
                 }
 
                 pstate.last_pos_sample = Some(player.position);
-                pstate.last_pos_sample_tick = ticknum;
+                pstate.last_sample_sim = sim;
+                pstate.last_sample_server_tick = Some(server_tick);
+            } else {
+                let sim_advanced = matches!((sim, pstate.last_sample_sim), (Some(s), Some(prev_s)) if s > prev_s);
+                let stale_server = pstate
+                    .last_sample_server_tick
+                    .is_some_and(|prev_st| server_tick.saturating_sub(prev_st) > 4);
+                if sim_advanced {
+                    pstate.current_speed_hu_s = 0.0;
+                    pstate.last_pos_sample = Some(player.position);
+                    pstate.last_sample_sim = sim;
+                    pstate.last_sample_server_tick = Some(server_tick);
+                } else if stale_server {
+                    pstate.current_speed_hu_s = 0.0;
+                }
             }
 
             let current_speed = pstate.current_speed_hu_s;
@@ -248,12 +306,13 @@ impl<'a> CheatAlgorithm<'a> for BunnyHop {
                 }
 
                 if pstate.hop_start_pos.is_none() {
-                    pstate.hop_start_pos = Some(player.position);
+                    pstate.set_hop_start(player.position, sim, server_tick);
                 }
             } else {
                 pstate.apex_z = pstate.apex_z.max(player.position.z);
 
-                // Compute horizontal displacement across the hop
+                // Compute horizontal displacement and average speed across the hop using actual
+                // elapsed sim/server ticks (not snapshot counts, which undercount at low updaterates).
                 let hop_dist = if let Some(start_pos) = pstate.hop_start_pos {
                     let hdx = player.position.x - start_pos.x;
                     let hdy = player.position.y - start_pos.y;
@@ -262,8 +321,14 @@ impl<'a> CheatAlgorithm<'a> for BunnyHop {
                     0.0
                 };
 
-                let hop_air_ticks = pstate.air_ticks.max(1);
-                let hop_speed_from_dist = (hop_dist / (hop_air_ticks as f32)) * 66.66667;
+                let hop_elapsed_ticks = elapsed_sim_or_server_ticks(
+                    sim,
+                    pstate.hop_start_sim,
+                    server_tick,
+                    pstate.hop_start_server_tick,
+                )
+                .unwrap_or(1);
+                let hop_speed_from_dist = hop_dist / (hop_elapsed_ticks as f32 * TICK_INTERVAL);
 
                 // Check for zero-tick ground bounce (instant jump impulse without FL_ONGROUND toggle)
                 // Filter out Scout mid-air double/triple jumps, blast jumping trajectories, and stationary collision oscillations:
@@ -281,54 +346,26 @@ impl<'a> CheatAlgorithm<'a> for BunnyHop {
                     && hop_dist >= min_hop_distance
                     && hop_speed_from_dist >= 80.0;
 
+                let mut hop_accepted = false;
+
                 if is_ground_bounce {
+                    pstate.air_ticks_at_landing = pstate.air_ticks;
+                    pstate.air_ticks = 1;
+                    pstate.ground_ticks = 0;
+                    pstate.launch_z = player.position.z;
+                    pstate.apex_z = player.position.z;
+
                     // Check if 0 ground ticks satisfies the configured max_ground_ticks limit
                     if 0 <= max_ground_ticks && current_speed >= min_speed {
                         pstate.current_streak += 1;
                         pstate.hop_ground_ticks.push(0);
                         pstate.hop_speeds.push(current_speed);
                         pstate.record_hop(player.position);
-                        pstate.hop_start_pos = Some(player.position);
-
-                        pstate.air_ticks_at_landing = pstate.air_ticks;
-                        pstate.air_ticks = 1;
-                        pstate.ground_ticks = 0;
-                        pstate.launch_z = player.position.z;
-                        pstate.apex_z = player.position.z;
-
-                        if pstate.current_streak >= min_streak as u32
-                            && pstate.current_streak > pstate.last_reported_streak
-                            && pstate.hop_ground_ticks.iter().all(|&g| g <= max_ground_ticks as u32)
-                            && pstate.bbox_diagonal() >= min_streak_bbox_diagonal
-                        {
-                            pstate.last_reported_streak = pstate.current_streak;
-                            let avg_speed = pstate.hop_speeds.iter().sum::<f32>()
-                                / pstate.hop_speeds.len() as f32;
-                            let max_speed = pstate
-                                .hop_speeds
-                                .iter()
-                                .cloned()
-                                .fold(0.0_f32, f32::max);
-                            let detection = Detection {
-                                tick: ticknum,
-                                algorithm: algo_name.clone(),
-                                player: steam_id,
-                                data: json!({
-                                    "class": player.class_name(),
-                                    "weapon": state.get_player_weapon(player),
-                                    "streak": pstate.current_streak,
-                                    "ground_ticks": pstate.hop_ground_ticks.clone(),
-                                    "avg_speed": avg_speed,
-                                    "max_speed": max_speed,
-                                    "speed": current_speed,
-                                }),
-                            };
-                            tick_detections.push(detection.clone());
-                            self.detections.push(detection);
-                        }
+                        hop_accepted = true;
                     } else {
                         pstate.reset_streak();
                     }
+                    pstate.set_hop_start(player.position, sim, server_tick);
                 } else if pstate.prev_on_ground {
                     let hopped_ground_ticks = pstate.ground_ticks;
                     let air_at_landing = pstate.air_ticks_at_landing;
@@ -337,12 +374,10 @@ impl<'a> CheatAlgorithm<'a> for BunnyHop {
                     pstate.launch_z = player.position.z;
                     pstate.apex_z = player.position.z;
 
-                    let landing_hop_speed = (hop_dist / (air_at_landing.max(1) as f32)) * 66.66667;
-
                     if air_at_landing >= min_air_ticks as u32
                         && current_speed >= min_speed
                         && hop_dist >= (min_hop_distance * 0.75)
-                        && landing_hop_speed >= 80.0
+                        && hop_speed_from_dist >= 80.0
                     {
                         // Strictly enforce that this hop does not exceed max_ground_ticks
                         if (hopped_ground_ticks as i32) <= max_ground_ticks {
@@ -350,38 +385,7 @@ impl<'a> CheatAlgorithm<'a> for BunnyHop {
                             pstate.hop_ground_ticks.push(hopped_ground_ticks);
                             pstate.hop_speeds.push(current_speed);
                             pstate.record_hop(player.position);
-                            pstate.hop_start_pos = Some(player.position);
-
-                            if pstate.current_streak >= min_streak as u32
-                                && pstate.current_streak > pstate.last_reported_streak
-                                && pstate.hop_ground_ticks.iter().all(|&g| g <= max_ground_ticks as u32)
-                                && pstate.bbox_diagonal() >= min_streak_bbox_diagonal
-                            {
-                                pstate.last_reported_streak = pstate.current_streak;
-                                let avg_speed = pstate.hop_speeds.iter().sum::<f32>()
-                                    / pstate.hop_speeds.len() as f32;
-                                let max_speed = pstate
-                                    .hop_speeds
-                                    .iter()
-                                    .cloned()
-                                    .fold(0.0_f32, f32::max);
-                                let detection = Detection {
-                                    tick: ticknum,
-                                    algorithm: algo_name.clone(),
-                                    player: steam_id,
-                                    data: json!({
-                                        "class": player.class_name(),
-                                        "weapon": state.get_player_weapon(player),
-                                        "streak": pstate.current_streak,
-                                        "ground_ticks": pstate.hop_ground_ticks.clone(),
-                                        "avg_speed": avg_speed,
-                                        "max_speed": max_speed,
-                                        "speed": current_speed,
-                                    }),
-                                };
-                                tick_detections.push(detection.clone());
-                                self.detections.push(detection);
-                            }
+                            hop_accepted = true;
                         } else {
                             // Ground contact exceeded max_ground_ticks -> break streak
                             pstate.reset_streak();
@@ -389,9 +393,39 @@ impl<'a> CheatAlgorithm<'a> for BunnyHop {
                     } else if air_at_landing >= min_air_ticks as u32 {
                         pstate.reset_streak();
                     }
-                    pstate.hop_start_pos = Some(player.position);
+                    pstate.set_hop_start(player.position, sim, server_tick);
                 } else {
                     pstate.air_ticks += 1;
+                }
+
+                if hop_accepted
+                    && pstate.current_streak >= min_streak as u32
+                    && pstate.current_streak > pstate.last_reported_streak
+                    && pstate.hop_ground_ticks.iter().all(|&g| g <= max_ground_ticks as u32)
+                    && pstate.bbox_diagonal() >= min_streak_bbox_diagonal
+                {
+                    pstate.last_reported_streak = pstate.current_streak;
+                    let avg_speed = pstate.hop_speeds.iter().sum::<f32>()
+                        / pstate.hop_speeds.len() as f32;
+                    let max_speed = pstate
+                        .hop_speeds
+                        .iter()
+                        .cloned()
+                        .fold(0.0_f32, f32::max);
+                    tick_detections.push(Detection {
+                        tick: ticknum,
+                        algorithm: algo_name.clone(),
+                        player: steam_id,
+                        data: json!({
+                            "class": player.class_name(),
+                            "weapon": state.get_player_weapon(player),
+                            "streak": pstate.current_streak,
+                            "ground_ticks": pstate.hop_ground_ticks.clone(),
+                            "avg_speed": avg_speed,
+                            "max_speed": max_speed,
+                            "speed": current_speed,
+                        }),
+                    });
                 }
             }
 

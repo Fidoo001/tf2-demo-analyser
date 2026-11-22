@@ -26,9 +26,9 @@
       "source_hash": "9b6731f15d34b89d"
     },
     "fidoo/bunnyhop": {
-      "ms_per_1k_ticks": 1.8837874325853183,
-      "samples": 1367,
-      "source_hash": "300f0ad61a01c05c"
+      "ms_per_1k_ticks": 1.7794108664886297,
+      "samples": 141,
+      "source_hash": "956ab109d1849959"
     },
     "fidoo/duckspeed": {
       "ms_per_1k_ticks": 2.17230494424342,
