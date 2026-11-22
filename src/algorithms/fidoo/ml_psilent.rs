@@ -57,6 +57,16 @@ const MAX_RATIO: f32 = 50.0;
 const MIN_DIVISOR: f32 = 0.25;
 /// A launch key seen this many ticks ago belongs to an earlier projectile (Delete events can be missed)
 const KEY_EXPIRY_TICKS: u32 = 4000;
+/// Huntsman arrow speed at full charge (`CTFCompoundBow::GetProjectileSpeed`, 1800..2600). A bow
+/// can only be overcharged (held >= 5 s) once it is fully charged, so slower arrows have no spread.
+const BOW_FULL_CHARGE_SPEED: f32 = 2600.0;
+/// Tolerance for the quantised m_vInitialVelocity.
+const BOW_SPEED_TOLERANCE: f32 = 15.0;
+/// TF_ARROW_MAX_CHARGE_TIME (5 s) at 66.67 ticks/s, minus slack for cond update delays.
+const BOW_OVERCHARGE_TICKS: u32 = 320;
+/// The aiming cond is removed when the arrow fires, possibly in an update before the projectile.
+const BOW_RELEASE_SLACK_TICKS: u32 = 4;
+const TF_COND_AIMING: u32 = 1 << 0;
 
 const KIND_ROCKET: u8 = 0;
 const KIND_PIPE: u8 = 1;
@@ -763,6 +773,78 @@ fn is_excluded_weapon(name: &str) -> bool {
     name.contains("Beggar") || name.contains("Rocket Jumper") || name.contains("Sticky Jumper")
 }
 
+fn is_bow(name: &str) -> bool {
+    name.contains("Huntsman") || name.contains("Compound")
+}
+
+/// Continuous TF_COND_AIMING run of a player. The bow adds the cond exactly when the charge
+/// starts and removes it on release, lower and holster. `start` is None when the run was already
+/// active when first seen (demo start, re-entering PVS, respawn) and its length is unknown.
+#[derive(Clone, Copy)]
+struct AimingRun {
+    start: Option<u32>,
+    end: u32,
+}
+
+#[derive(Default)]
+struct AimingTracker {
+    current: Option<AimingRun>,
+    last: Option<AimingRun>,
+    /// Whether the player was last seen in PVS and alive without the cond, so a new run's start is exact.
+    seen_not_aiming: bool,
+}
+
+impl AimingTracker {
+    fn update(&mut self, tick: u32, player: &Player) {
+        if self.current.is_some_and(|r| r.end > tick) || self.last.is_some_and(|r| r.end > tick) {
+            *self = Self::default();
+        }
+        if !player.in_pvs || player.state != PlayerState::Alive {
+            if let Some(run) = self.current.take() {
+                self.last = Some(run);
+            }
+            self.seen_not_aiming = false;
+            return;
+        }
+        if player.cond & TF_COND_AIMING != 0 {
+            match &mut self.current {
+                Some(run) => run.end = run.end.max(tick),
+                None => {
+                    let start = self.seen_not_aiming.then_some(tick);
+                    self.current = Some(AimingRun { start, end: tick });
+                }
+            }
+        } else {
+            if let Some(run) = self.current.take() {
+                self.last = Some(run);
+            }
+            self.seen_not_aiming = true;
+        }
+    }
+
+    /// Charge length (ticks) of the aiming run released at `tick`: Some(None) when its start is
+    /// unknown, None when no such run was seen.
+    fn charge_ticks(&self, tick: u32) -> Option<Option<u32>> {
+        let run = self
+            .current
+            .or(self.last.filter(|run| tick.saturating_sub(run.end) <= BOW_RELEASE_SLACK_TICKS))?;
+        Some(run.start.map(|start| run.end.max(tick).saturating_sub(start)))
+    }
+}
+
+fn may_be_overcharged_arrow(kind: u8, weapon: &str, speed: f32, charge_ticks: Option<Option<u32>>) -> bool {
+    kind == KIND_ARROW
+        && is_bow(weapon)
+        && speed >= BOW_FULL_CHARGE_SPEED - BOW_SPEED_TOLERANCE
+        && match charge_ticks {
+            // Start not seen: may have been held long enough.
+            Some(None) => true,
+            Some(Some(ticks)) => ticks >= BOW_OVERCHARGE_TICKS,
+            // No aiming run seen at all.
+            None => false,
+        }
+}
+
 fn view_height(player: &Player) -> f32 {
     match player.class {
         Class::Scout => 65.0,
@@ -775,6 +857,7 @@ pub struct MlPsilent {
     params: Parameters,
     history: FxHashMap<u32, VecDeque<Sample>>,
     velocity: FxHashMap<u32, [f32; 3]>,
+    aiming: FxHashMap<u32, AimingTracker>,
     seen: FxHashMap<(u32, u32), u32>,
     pending: Vec<Pending>,
     recorder: Option<u64>,
@@ -804,12 +887,21 @@ impl MlPsilent {
             ]),
             history: FxHashMap::default(),
             velocity: FxHashMap::default(),
+            aiming: FxHashMap::default(),
             seen: FxHashMap::default(),
             pending: Vec::new(),
             recorder: None,
             launches: Vec::new(),
             units: Vec::new(),
             dump_paths: false,
+        }
+    }
+
+    fn update_aiming(&mut self, state: &CheatAnalyserState) {
+        let tick = u32::from(state.tick);
+        for p in &state.players {
+            let ent = u32::from(p.entity);
+            self.aiming.entry(ent).or_default().update(tick, p);
         }
     }
 
@@ -865,6 +957,12 @@ impl MlPsilent {
         let Some(velocity) = launch_velocity(kind, props) else { return };
         let speed = len3(velocity);
         if speed < MIN_LAUNCH_SPEED {
+            return;
+        }
+        // A Huntsman / Fortified Compound held >= 5 s fires with massive random spread (+-6 deg on
+        // pitch and yaw each, CTFCompoundBow::GetProjectileFireSetup); ignore overcharged arrows.
+        let charge_ticks = self.aiming.get(&owner_ent).and_then(|t| t.charge_ticks(tick));
+        if may_be_overcharged_arrow(kind, &weapon, speed, charge_ticks) {
             return;
         }
         let dir = [velocity[0] / speed, velocity[1] / speed, velocity[2] / speed];
@@ -940,6 +1038,7 @@ impl<'a> CheatAlgorithm<'a> for MlPsilent {
         let Message::PacketEntities(message) = message else {
             return Ok(vec![]);
         };
+        self.update_aiming(state);
         if self.recorder.is_none() {
             self.recorder = resolve_recorder_sid(state);
         }
@@ -966,6 +1065,7 @@ impl<'a> CheatAlgorithm<'a> for MlPsilent {
     }
 
     fn on_tick(&mut self, state: &CheatAnalyserState, _: &ParserState) -> Result<Vec<Detection>, Error> {
+        self.update_aiming(state);
         let tick = u32::from(state.tick);
         for p in &state.players {
             let ent = u32::from(p.entity);
@@ -1123,5 +1223,18 @@ mod tests {
     fn quantile_matches_numpy() {
         assert_eq!(quantile(&mut [1.0, 2.0, 3.0, 4.0], 0.5), 2.5);
         assert!(quantile(&mut [], 0.5).is_nan());
+    }
+
+    #[test]
+    fn overcharged_bow_arrow_is_filtered() {
+        assert!(may_be_overcharged_arrow(KIND_ARROW, "Huntsman", 2600.0, Some(Some(320))));
+        assert!(may_be_overcharged_arrow(KIND_ARROW, "Fortified Compound", 2585.0, Some(None)));
+        // Partial charge or short hold: not overcharged
+        assert!(!may_be_overcharged_arrow(KIND_ARROW, "Huntsman", 2400.0, Some(Some(400))));
+        assert!(!may_be_overcharged_arrow(KIND_ARROW, "Huntsman", 2600.0, Some(Some(100))));
+        assert!(!may_be_overcharged_arrow(KIND_ARROW, "Huntsman", 2600.0, None));
+        // Non-bow / non-arrow projectiles are unaffected
+        assert!(!may_be_overcharged_arrow(KIND_ROCKET, "Rocket Launcher", 2600.0, Some(Some(400))));
+        assert!(!may_be_overcharged_arrow(KIND_BOLT, "Crusader's Crossbow", 2600.0, Some(Some(400))));
     }
 }
