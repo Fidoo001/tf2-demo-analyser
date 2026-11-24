@@ -95,7 +95,7 @@ impl SilentAim {
         }
 
         // Excluded: Non-combat mobility tools, non-damaging healing tools, engineer tools,
-        // and continuous-fire weapons where silent aim is physically impossible / non-existent (Flamethrowers & Miniguns)
+        // and continuous-fire flame weapons where silent aim is physically impossible / non-existent (Flamethrowers)
         if lw.contains("medigun")
             || lw.contains("medi gun")
             || lw.contains("kritzkrieg")
@@ -117,14 +117,6 @@ impl SilentAim {
             || lw.contains("rainblower")
             || lw.contains("nostromo")
             || lw.contains("napalm")
-            // Rapid-fire continuous spin-up miniguns (40 rounds/sec; silent aim does not exist)
-            || lw.contains("minigun")
-            || lw.contains("iron curtain")
-            || lw.contains("natascha")
-            || lw.contains("brass beast")
-            || lw.contains("tomislav")
-            || lw.contains("huo-long")
-            || lw.contains("huo long")
         {
             return WeaponCategory::Excluded;
         }
@@ -1001,19 +993,21 @@ mod tests {
 
     #[test]
     fn test_damaging_weapons_classification() {
-        // Continuous flame stream weapons and miniguns must be Excluded (silent aim impossible / non-existent)
+        // Continuous flame stream weapons must be Excluded (silent aim impossible / non-existent)
         assert_eq!(SilentAim::classify_weapon("Flame Thrower"), WeaponCategory::Excluded);
         assert_eq!(SilentAim::classify_weapon("Degreaser"), WeaponCategory::Excluded);
         assert_eq!(SilentAim::classify_weapon("Backburner"), WeaponCategory::Excluded);
         assert_eq!(SilentAim::classify_weapon("The Phlogistinator"), WeaponCategory::Excluded);
         assert_eq!(SilentAim::classify_weapon("Rainblower"), WeaponCategory::Excluded);
         assert_eq!(SilentAim::classify_weapon("Nostromo Napalmer"), WeaponCategory::Excluded);
-        assert_eq!(SilentAim::classify_weapon("Minigun"), WeaponCategory::Excluded);
-        assert_eq!(SilentAim::classify_weapon("Iron Curtain"), WeaponCategory::Excluded);
-        assert_eq!(SilentAim::classify_weapon("Tomislav"), WeaponCategory::Excluded);
-        assert_eq!(SilentAim::classify_weapon("Natascha"), WeaponCategory::Excluded);
-        assert_eq!(SilentAim::classify_weapon("The Brass Beast"), WeaponCategory::Excluded);
-        assert_eq!(SilentAim::classify_weapon("Huo-Long Heater"), WeaponCategory::Excluded);
+
+        // Miniguns are hitscan and can use silent aim
+        assert_eq!(SilentAim::classify_weapon("Minigun"), WeaponCategory::Hitscan);
+        assert_eq!(SilentAim::classify_weapon("Iron Curtain"), WeaponCategory::Hitscan);
+        assert_eq!(SilentAim::classify_weapon("Tomislav"), WeaponCategory::Hitscan);
+        assert_eq!(SilentAim::classify_weapon("Natascha"), WeaponCategory::Hitscan);
+        assert_eq!(SilentAim::classify_weapon("The Brass Beast"), WeaponCategory::Hitscan);
+        assert_eq!(SilentAim::classify_weapon("Huo-Long Heater"), WeaponCategory::Hitscan);
 
         // Projectile weapons that fire discrete projectiles
         assert_eq!(SilentAim::classify_weapon("Dragon's Fury"), WeaponCategory::Projectile);
