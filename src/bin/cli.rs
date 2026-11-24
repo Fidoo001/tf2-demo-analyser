@@ -13,6 +13,7 @@ use analysis_template::{
     },
     playerlist_view::parse_playerlist,
     recorder_view::parse_recorder,
+    util::archive::{extract_demo_to_temp, is_archive_path, list_demos_in_archive},
     util::helpers::{
         convert_demo_to_replay, convert_demo_to_replay_with_takes, find_default_tf2_dir,
         format_sus_demo_filename, strip_consolecmds_from_bytes,
@@ -1248,10 +1249,14 @@ fn run_bulk_scan(
 }
 
 fn main() -> Result<(), Error> {
-    let start = std::time::Instant::now();
-
     let mut opts = Options::new();
-    opts.optopt("i", "input", "set input file path", "PATH");
+    opts.optopt("i", "input", "set input demo or archive file path", "PATH");
+    opts.optopt(
+        "I",
+        "index",
+        "0-based index of a specific demo inside an archive passed to -i (if omitted, all demos in the archive are processed)",
+        "INDEX",
+    );
     opts.optflagopt(
         "b",
         "bulk",
@@ -1661,28 +1666,157 @@ fn main() -> Result<(), Error> {
         );
     }
 
-    // Single demo analysis mode
+    // Single demo or archive analysis mode
     let demo_path = match input_opt {
         Some(p) => p,
         None => {
             eprintln!("Error: No input demo file provided.");
             eprintln!("Usage:");
-            eprintln!("  Single demo: cli -i <path/to/demo.dem> [options]");
-            eprintln!("  Bulk scan:   cli --bulk [optional/path/to/tf] [options]");
+            eprintln!("  Single demo / archive: cli -i <path/to/demo_or_archive> [--index N] [options]");
+            eprintln!("  Bulk scan:             cli --bulk [optional/path/to/tf] [options]");
             print_help(&opts);
             return Ok(());
         }
     };
 
+    let archive_index: Option<usize> = match matches.opt_str("I") {
+        Some(raw) => match raw.trim().parse::<usize>() {
+            Ok(idx) => Some(idx),
+            Err(e) => {
+                eprintln!(
+                    "Error: Invalid archive index '{}': {} (expected a 0-based non-negative integer)",
+                    raw, e
+                );
+                return Err(e.into());
+            }
+        },
+        None => None,
+    };
+
+    let single_args = SingleDemoArgs {
+        matches: &matches,
+        config: &config,
+        specified_algorithms: &specified_algorithms,
+        reported_ids: &reported_ids,
+        ignore_marked,
+        ignore_deleted,
+        silent,
+        pretty,
+        strip,
+        strip_only,
+        custom_scratch_dir: &custom_scratch_dir,
+    };
+
+    if is_archive_path(Path::new(&demo_path)) {
+        let entries = list_demos_in_archive(Path::new(&demo_path))?;
+        if entries.is_empty() {
+            return Err(anyhow::anyhow!("No .dem files found in archive '{}'", demo_path));
+        }
+
+        let indices_to_run: Vec<usize> = match archive_index {
+            Some(idx) => {
+                if idx >= entries.len() {
+                    return Err(anyhow::anyhow!(
+                        "Archive index {} out of range (archive '{}' contains {} demo(s), valid indices: 0..={})",
+                        idx,
+                        demo_path,
+                        entries.len(),
+                        entries.len() - 1
+                    ));
+                }
+                vec![idx]
+            }
+            None => (0..entries.len()).collect(),
+        };
+
+        let multi = indices_to_run.len() > 1;
+        let mut failures = 0usize;
+        for (pos, idx) in indices_to_run.iter().copied().enumerate() {
+            if !silent && multi {
+                println!(
+                    "\n=== [{}/{}] {} (index {}) ===",
+                    pos + 1,
+                    indices_to_run.len(),
+                    entries[idx].name,
+                    idx
+                );
+            }
+            let extracted = extract_demo_to_temp(Path::new(&demo_path), idx)?;
+            let temp_path_str = extracted.path.to_string_lossy().into_owned();
+            let res = run_single_demo(&temp_path_str, &entries[idx].name, &single_args);
+            drop(extracted);
+            if multi {
+                if let Err(e) = res {
+                    eprintln!("Error processing '{}' (index {}): {}", entries[idx].name, idx, e);
+                    failures += 1;
+                }
+            } else {
+                res?;
+            }
+        }
+        if failures > 0 {
+            return Err(anyhow::anyhow!(
+                "{} of {} demo(s) in archive '{}' failed",
+                failures,
+                indices_to_run.len(),
+                demo_path
+            ));
+        }
+        return Ok(());
+    }
+
+    if let Some(idx) = archive_index {
+        return Err(anyhow::anyhow!(
+            "--index / -I ({}) can only be used when -i points to an archive, not '{}'",
+            idx,
+            demo_path
+        ));
+    }
+
+    run_single_demo(&demo_path, &demo_path, &single_args)
+}
+
+struct SingleDemoArgs<'a> {
+    matches: &'a getopts::Matches,
+    config: &'a Option<HashMap<String, Parameters>>,
+    specified_algorithms: &'a [String],
+    reported_ids: &'a Option<HashSet<u64>>,
+    ignore_marked: bool,
+    ignore_deleted: bool,
+    silent: bool,
+    pretty: bool,
+    strip: bool,
+    strip_only: bool,
+    custom_scratch_dir: &'a Option<PathBuf>,
+}
+
+fn run_single_demo(
+    demo_path: &str,
+    display_name: &str,
+    args: &SingleDemoArgs<'_>,
+) -> Result<(), Error> {
+    let start = std::time::Instant::now();
+    let matches = args.matches;
+    let config = args.config;
+    let specified_algorithms = args.specified_algorithms;
+    let reported_ids = args.reported_ids;
+    let ignore_marked = args.ignore_marked;
+    let ignore_deleted = args.ignore_deleted;
+    let silent = args.silent;
+    let pretty = args.pretty;
+    let strip = args.strip;
+    let strip_only = args.strip_only;
+    let custom_scratch_dir = args.custom_scratch_dir;
+
     // If --strip or --strip-only was specified:
     let (file_bytes, target_demo_path) = if strip || strip_only {
-        let raw = fs::read(&demo_path)?;
+        let raw = fs::read(demo_path)?;
         let (stripped_bytes, count) = strip_consolecmds_from_bytes(&raw)
-            .map_err(|e| anyhow::anyhow!("Failed to strip consolecmds from '{}': {}", demo_path, e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to strip consolecmds from '{}': {}", display_name, e))?;
 
         let scratch_dir = custom_scratch_dir.clone().unwrap_or_else(|| PathBuf::from("scratch"));
         fs::create_dir_all(&scratch_dir)?;
-        let filename = Path::new(&demo_path)
+        let filename = Path::new(display_name)
             .file_name()
             .unwrap_or_else(|| std::ffi::OsStr::new("stripped.dem"));
         let scratch_path = scratch_dir.join(filename);
@@ -1692,7 +1826,7 @@ fn main() -> Result<(), Error> {
             println!(
                 "Stripped {} consolecmd(s) from '{}' -> '{}'",
                 count,
-                demo_path,
+                display_name,
                 scratch_path.display()
             );
         }
@@ -1700,7 +1834,7 @@ fn main() -> Result<(), Error> {
         if strip_only {
             if silent {
                 let res = serde_json::json!({
-                    "demo": demo_path,
+                    "demo": display_name,
                     "stripped_to": scratch_path.to_string_lossy(),
                     "stripped_consolecmds": count,
                 });
@@ -1711,8 +1845,8 @@ fn main() -> Result<(), Error> {
 
         (stripped_bytes, scratch_path.to_string_lossy().to_string())
     } else {
-        let raw = fs::read(&demo_path)?;
-        (raw, demo_path.clone())
+        let raw = fs::read(demo_path)?;
+        (raw, demo_path.to_string())
     };
 
     // Recorder: the recording client's own slot from SVC_ServerInfo (not the header nick)

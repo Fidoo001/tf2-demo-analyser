@@ -454,7 +454,7 @@ impl MlPlainProjectile {
         Self {
             params: HashMap::from([
                 ("enabled".to_string(), Parameter::Bool(true)),
-                ("min_score".to_string(), Parameter::Float(0.65)),
+                ("min_score".to_string(), Parameter::Float(0.67)),
                 ("min_events".to_string(), Parameter::Int(5)),
                 ("max_detections".to_string(), Parameter::Int(5)),
             ]),

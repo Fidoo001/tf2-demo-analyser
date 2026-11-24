@@ -563,7 +563,7 @@ impl MlAutoBackstab {
         Self {
             params: Parameters::from([
                 ("enabled".to_string(), Parameter::Bool(true)),
-                ("min_score".to_string(), Parameter::Float(0.7)),
+                ("min_score".to_string(), Parameter::Float(0.41)),
                 ("min_stabs".to_string(), Parameter::Int(3)),
                 ("max_detections".to_string(), Parameter::Int(3)),
             ]),

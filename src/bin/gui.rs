@@ -23,6 +23,10 @@ use analysis_template::rcon::{
 #[cfg(feature = "tf2bd")]
 use analysis_template::{tf2bd::Tf2bdSettings, tf2bd_view::Tf2bdUi};
 use analysis_template::{debug_log, util::debug_log};
+use analysis_template::util::archive::{
+    extract_demo_to_temp, format_byte_size, is_archive_path, list_demos_in_archive,
+    ArchiveDemoEntry, ExtractedTempDemo, ARCHIVE_EXTENSIONS,
+};
 use eframe::egui;
 use itertools::Itertools;
 use steamid_ng::SteamID;
@@ -514,6 +518,14 @@ impl BulkScanUi {
     }
 }
 
+/// State of the modal shown when opening an archive that contains multiple demos.
+struct ArchivePickerState {
+    archive_path: std::path::PathBuf,
+    entries: Vec<ArchiveDemoEntry>,
+    selected_index: usize,
+    auto_analyse: bool,
+}
+
 /// Moves a demo, falling back to copy + delete across drives (same as the CLI bulk scan).
 fn move_demo_file(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
     if src == dst {
@@ -942,6 +954,48 @@ fn custom_visuals(text: egui::Color32, bg: egui::Color32, selected: egui::Color3
 /// Serialized parameters per algorithm/section, as written to params.json.
 type SettingsSnapshot = HashMap<String, HashMap<String, serde_json::Value>>;
 
+/// Normalizes session-only player identifier parameters (`recorder_id`, `target_player`) to
+/// strings, matching how the parameters UI stores and edits them.
+fn normalize_algo_param(key: &str, value: Parameter) -> Parameter {
+    if key == "recorder_id" || key == "target_player" {
+        match value {
+            Parameter::Int(i) => Parameter::String(if i <= 0 { String::new() } else { i.to_string() }),
+            Parameter::UInt(u) => Parameter::String(if u == 0 { String::new() } else { u.to_string() }),
+            other => other,
+        }
+    } else {
+        value
+    }
+}
+
+fn parameter_eq(a: &Parameter, b: &Parameter) -> bool {
+    match (a, b) {
+        (Parameter::Float(x), Parameter::Float(y)) => x.to_bits() == y.to_bits() || x == y,
+        (Parameter::Int(x), Parameter::Int(y)) => x == y,
+        (Parameter::Bool(x), Parameter::Bool(y)) => x == y,
+        (Parameter::UInt(x), Parameter::UInt(y)) => x == y,
+        (Parameter::String(x), Parameter::String(y)) => x == y,
+        _ => false,
+    }
+}
+
+/// Returns `true` when every non-`enabled` default parameter matches the current value.
+fn algo_params_are_default(current: &Parameters, defaults: &Parameters) -> bool {
+    defaults
+        .iter()
+        .filter(|(k, _)| k.as_str() != "enabled")
+        .all(|(k, def_val)| current.get(k).is_some_and(|cur_val| parameter_eq(cur_val, def_val)))
+}
+
+/// Restores every non-`enabled` parameter in `current` to its value in `defaults`.
+fn reset_algo_params(current: &mut Parameters, defaults: &Parameters) {
+    for (k, def_val) in defaults {
+        if k != "enabled" {
+            current.insert(k.clone(), def_val.clone());
+        }
+    }
+}
+
 const UNSAVED_COLOR: egui::Color32 = egui::Color32::from_rgb(255, 170, 40);
 const MAX_RECENT_FILES: usize = 10;
 /// Window size (in points) at 100% UI scale, which is also the minimum window size.
@@ -1007,6 +1061,7 @@ fn fetch_available_update() -> Option<AvailableUpdate> {
 struct Gui {
     algos: HashMap<String, bool>,
     params: HashMap<String, Parameters>,
+    default_algo_params: HashMap<String, Parameters>,
     algo_tooltips: HashMap<String, &'static str>,
     file: Option<std::path::PathBuf>,
     processing: bool,
@@ -1027,6 +1082,9 @@ struct Gui {
     recording_date: analysis_template::recording_date_view::RecordingDateView,
     show_delete_replays_prompt: bool,
     bulk_scan: BulkScanUi,
+    extracted_temp_demo: Option<ExtractedTempDemo>,
+    archive_context: Option<(std::path::PathBuf, Vec<ArchiveDemoEntry>, usize)>,
+    archive_picker: Option<ArchivePickerState>,
     save_feedback: Option<(std::time::Instant, Result<(), String>)>,
     prev_demo: Option<std::path::PathBuf>,
     next_demo: Option<std::path::PathBuf>,
@@ -1394,6 +1452,16 @@ impl Gui {
                 params.insert(a.algorithm_name().to_string(), a.params().cloned().unwrap());
             }
         }
+        let default_algo_params: HashMap<String, Parameters> = params
+            .iter()
+            .map(|(algo, algo_params)| {
+                let normalized = algo_params
+                    .iter()
+                    .map(|(k, v)| (k.clone(), normalize_algo_param(k, v.clone())))
+                    .collect();
+                (algo.clone(), normalized)
+            })
+            .collect();
 
         let params_path = Self::params_path();
         let data_opt = std::fs::read_to_string(&params_path)
@@ -1448,6 +1516,16 @@ impl Gui {
                 let _ = std::fs::write(&params_path, &json_data);
                 if params_path != std::path::Path::new("params.json") {
                     let _ = std::fs::write("params.json", &json_data);
+                }
+            }
+        }
+
+        for algo_name in default_algo_params.keys() {
+            if let Some(algo_params) = params.get_mut(algo_name) {
+                for key in ["recorder_id", "target_player"] {
+                    if let Some(val) = algo_params.get_mut(key) {
+                        *val = normalize_algo_param(key, val.clone());
+                    }
                 }
             }
         }
@@ -1774,6 +1852,7 @@ impl Gui {
         let gui = Self {
             algos,
             params,
+            default_algo_params,
             algo_tooltips,
             file: None,
             processing: false,
@@ -1793,6 +1872,9 @@ impl Gui {
             recording_date: analysis_template::recording_date_view::RecordingDateView::new(),
             show_delete_replays_prompt: false,
             bulk_scan: BulkScanUi::new(),
+            extracted_temp_demo: None,
+            archive_context: None,
+            archive_picker: None,
             save_feedback: None,
             prev_demo: None,
             next_demo: None,
@@ -1857,6 +1939,9 @@ impl Gui {
     fn update_adjacent_demos(&mut self) {
         self.prev_demo = None;
         self.next_demo = None;
+        if self.archive_context.is_some() {
+            return;
+        }
         let Some(current_file) = &self.file else {
             return;
         };
@@ -1900,6 +1985,14 @@ impl Gui {
     }
 
     fn select_demo(&mut self, path: std::path::PathBuf) {
+        self.select_demo_inner(path, true, true);
+    }
+
+    fn select_demo_inner(&mut self, path: std::path::PathBuf, record_recent: bool, clear_archive: bool) {
+        if clear_archive {
+            self.extracted_temp_demo = None;
+            self.archive_context = None;
+        }
         self.file = Some(path.clone());
         self.analyser = None;
         self.detections.clear();
@@ -1913,7 +2006,9 @@ impl Gui {
             self.voice_export_feedback = None;
         }
         self.analysis_error = None;
-        self.add_recent_file(&path);
+        if record_recent {
+            self.add_recent_file(&path);
+        }
         self.update_adjacent_demos();
 
         // A manually opened demo must not be replaced by results from a live scan
@@ -1927,6 +2022,76 @@ impl Gui {
                 self.params.entry("rcon".to_string()).or_default()
                     .insert("real_time_scanning".to_string(), Parameter::Bool(false));
                 self.save_params();
+            }
+        }
+    }
+
+    /// Opens a `.dem` file directly, or inspects an archive: 1 demo auto-opens, multiple demos open a modal selector.
+    fn open_path(&mut self, ctx: &egui::Context, path: std::path::PathBuf, auto_analyse: bool) {
+        if is_archive_path(&path) {
+            match list_demos_in_archive(&path) {
+                Ok(entries) if entries.is_empty() => {
+                    self.analysis_error = Some(format!("No .dem files found in archive '{}'", path.display()));
+                }
+                Ok(entries) if entries.len() == 1 => {
+                    self.load_archive_demo(ctx, path, entries, 0, auto_analyse);
+                }
+                Ok(entries) => {
+                    let selected_index = match &self.archive_context {
+                        Some((cur_arc, _, cur_idx)) if cur_arc == &path && *cur_idx < entries.len() => *cur_idx,
+                        _ => 0,
+                    };
+                    self.archive_picker = Some(ArchivePickerState {
+                        archive_path: path,
+                        entries,
+                        selected_index,
+                        auto_analyse,
+                    });
+                }
+                Err(e) => {
+                    self.analysis_error = Some(format!("Failed to open archive '{}': {e}", path.display()));
+                }
+            }
+        } else {
+            self.select_demo(path);
+            if auto_analyse {
+                self.analyse(ctx);
+            }
+        }
+    }
+
+    /// Extracts only the chosen demo from the archive (deleting any previous extracted temp demo first).
+    fn load_archive_demo(
+        &mut self,
+        ctx: &egui::Context,
+        archive_path: std::path::PathBuf,
+        entries: Vec<ArchiveDemoEntry>,
+        index: usize,
+        auto_analyse: bool,
+    ) {
+        let had_temp_loaded = self.extracted_temp_demo.is_some();
+        self.extracted_temp_demo = None;
+        match extract_demo_to_temp(&archive_path, index) {
+            Ok(temp) => {
+                let temp_path = temp.path.clone();
+                self.archive_context = Some((archive_path.clone(), entries, index));
+                self.select_demo_inner(temp_path, false, false);
+                self.add_recent_file(&archive_path);
+                self.extracted_temp_demo = Some(temp);
+                if auto_analyse {
+                    self.analyse(ctx);
+                }
+            }
+            Err(e) => {
+                if had_temp_loaded {
+                    self.file = None;
+                    self.analyser = None;
+                    self.detections.clear();
+                    self.selected_player = None;
+                    self.selected_detection = None;
+                    self.archive_context = None;
+                }
+                self.analysis_error = Some(format!("Failed to extract demo from archive: {e}"));
             }
         }
     }
@@ -2576,6 +2741,87 @@ impl Gui {
         }
     }
 
+    /// Blocking modal selector shown when opening an archive containing multiple demos.
+    fn show_archive_picker_modal(&mut self, ctx: &egui::Context) {
+        let Some(state) = self.archive_picker.as_mut() else {
+            return;
+        };
+        let mut confirm = false;
+        let mut cancel = false;
+        let archive_name = state
+            .archive_path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| state.archive_path.to_string_lossy().to_string());
+        let entry_count = state.entries.len();
+
+        let response = egui::Modal::new(egui::Id::new("archive_demo_picker_modal")).show(ctx, |ui| {
+            ui.set_width(500.0);
+            ui.heading(format!("Select demo from {archive_name}"));
+            ui.label(format!(
+                "Found {entry_count} demos in the archive. Choose one to extract and load:"
+            ));
+            ui.add_space(6.0);
+
+            if ui.input(|i| i.key_pressed(egui::Key::ArrowDown)) && state.selected_index + 1 < entry_count {
+                state.selected_index += 1;
+            }
+            if ui.input(|i| i.key_pressed(egui::Key::ArrowUp)) && state.selected_index > 0 {
+                state.selected_index -= 1;
+            }
+
+            egui::ScrollArea::vertical()
+                .max_height(320.0)
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    for entry in &state.entries {
+                        let is_selected = state.selected_index == entry.index;
+                        let size_suffix = entry
+                            .uncompressed_size
+                            .map(|s| format!(" ({})", format_byte_size(s)))
+                            .unwrap_or_default();
+                        let label = format!("[{}] {}{}", entry.index, entry.name, size_suffix);
+                        let item_resp = ui.selectable_label(is_selected, label);
+                        if item_resp.clicked() {
+                            state.selected_index = entry.index;
+                        }
+                        if item_resp.double_clicked() {
+                            state.selected_index = entry.index;
+                            confirm = true;
+                        }
+                    }
+                });
+
+            if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                confirm = true;
+            }
+
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui.button("Open").clicked() {
+                    confirm = true;
+                }
+                if ui.button("Cancel").clicked() {
+                    cancel = true;
+                }
+            });
+        });
+
+        if confirm {
+            if let Some(picked) = self.archive_picker.take() {
+                self.load_archive_demo(
+                    ctx,
+                    picked.archive_path,
+                    picked.entries,
+                    picked.selected_index,
+                    picked.auto_analyse,
+                );
+            }
+        } else if cancel || response.should_close() {
+            self.archive_picker = None;
+        }
+    }
+
     fn analyse(&mut self, ctx: &egui::Context) {
         if self.file.is_none() {
             return;
@@ -2747,6 +2993,8 @@ impl Gui {
                     RealTimeScanEvent::DemoDetected { demo_path, recorder_name } => {
                         // Select the latest demo right away instead of when the first scan finishes
                         if !self.processing && self.file.as_ref() != Some(&demo_path) {
+                            self.extracted_temp_demo = None;
+                            self.archive_context = None;
                             self.file = Some(demo_path);
                             self.analyser = None;
                             self.detections.clear();
@@ -2780,6 +3028,8 @@ impl Gui {
                         analyser.state.console_cmds.shrink_to_fit();
                         // The scanner keeps the detections of the earlier scans of this demo, so
                         // replacing the results here drops nothing found before.
+                        self.extracted_temp_demo = None;
+                        self.archive_context = None;
                         self.file = Some(demo_path);
                         self.analyser = Some(analyser);
                         self.detections.clear();
@@ -2836,8 +3086,11 @@ impl Gui {
         }
 
         #[allow(unused_mut)]
-        let mut has_open_subwindow =
-            self.header_window.is_open || self.playerlist_window.is_open || self.chat_window.is_open || self.bulk_scan.open;
+        let mut has_open_subwindow = self.header_window.is_open
+            || self.playerlist_window.is_open
+            || self.chat_window.is_open
+            || self.bulk_scan.open
+            || self.archive_picker.is_some();
         #[cfg(feature = "tf2bd")]
         {
             has_open_subwindow |= self.tf2bd.any_modal_open();
@@ -3366,14 +3619,34 @@ impl Gui {
                                 continue;
                             }
                             ui.add_space(10.0);
-                            let mut heading = ui.heading(name);
-                            if self.scroll_to_algo.as_deref() == Some(name.as_str()) {
-                                heading.scroll_to_me(Some(egui::Align::TOP));
-                                self.scroll_to_algo = None;
-                            }
-                            if let Some(tip) = self.algo_tooltips.get(name).copied() {
-                                heading = heading.on_hover_text(tip);
-                            }
+                            ui.horizontal(|ui| {
+                                let mut heading = ui.heading(name);
+                                if self.scroll_to_algo.as_deref() == Some(name.as_str()) {
+                                    heading.scroll_to_me(Some(egui::Align::TOP));
+                                    self.scroll_to_algo = None;
+                                }
+                                if let Some(tip) = self.algo_tooltips.get(name).copied() {
+                                    heading = heading.on_hover_text(tip);
+                                }
+                                if let Some(defaults) = self.default_algo_params.get(name) {
+                                    let is_default = algo_params_are_default(params, defaults);
+                                    let right_edge = ui.ctx().screen_rect().max.x - 24.0;
+                                    let width = (right_edge - ui.cursor().min.x).max(50.0);
+                                    ui.allocate_ui_with_layout(
+                                        egui::vec2(width, heading.rect.height()),
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            let btn = ui
+                                                .add_enabled(!is_default, egui::Button::new("Reset").small())
+                                                .on_hover_text("Reset parameters to default")
+                                                .on_disabled_hover_text("Parameters are already at default values");
+                                            if btn.clicked() {
+                                                reset_algo_params(params, defaults);
+                                            }
+                                        },
+                                    );
+                                }
+                            });
                             ui.separator();
                             for param in params.iter_mut().sorted_by_key(|p|p.0){
                                 if param.0 == "enabled" {
@@ -3472,11 +3745,15 @@ impl Gui {
             ui.add_space(10.0);
             ui.horizontal(|ui| {
                 if ui.add_enabled(!self.processing, egui::Button::new("Open...")).clicked() {
+                    let mut all_exts = vec!["dem"];
+                    all_exts.extend_from_slice(ARCHIVE_EXTENSIONS);
                     if let Some(path) = rfd::FileDialog::new()
+                        .add_filter("Demos & Archives", &all_exts)
                         .add_filter("Demos", &["dem"])
+                        .add_filter("Archives", ARCHIVE_EXTENSIONS)
                         .pick_file()
                     {
-                        self.select_demo(path);
+                        self.open_path(ui.ctx(), path, false);
                     }
                 }
                 ui.add_enabled_ui(self.file.is_some(), |ui|{
@@ -3627,16 +3904,33 @@ impl Gui {
             let demo_buttons_enabled = self.file.is_some() && !self.processing;
             ui.horizontal(|ui| {
                 ui.add_enabled_ui(demo_buttons_enabled, |ui| {
-                    if ui.add_enabled(self.prev_demo.is_some(), egui::Button::new("Previous demo")).clicked() {
-                        self.update_adjacent_demos();
-                        if let Some(prev_path) = self.prev_demo.clone() {
-                            self.select_demo(prev_path);
+                    let (has_prev, has_next) = if let Some((_, entries, idx)) = &self.archive_context {
+                        (*idx > 0, idx + 1 < entries.len())
+                    } else {
+                        (self.prev_demo.is_some(), self.next_demo.is_some())
+                    };
+                    if ui.add_enabled(has_prev, egui::Button::new("Previous demo")).clicked() {
+                        if let Some((arc_path, entries, idx)) = self.archive_context.clone() {
+                            if idx > 0 {
+                                self.load_archive_demo(ui.ctx(), arc_path, entries, idx - 1, false);
+                            }
+                        } else {
+                            self.update_adjacent_demos();
+                            if let Some(prev_path) = self.prev_demo.clone() {
+                                self.select_demo(prev_path);
+                            }
                         }
                     }
-                    if ui.add_enabled(self.next_demo.is_some(), egui::Button::new("Next demo")).clicked() {
-                        self.update_adjacent_demos();
-                        if let Some(next_path) = self.next_demo.clone() {
-                            self.select_demo(next_path);
+                    if ui.add_enabled(has_next, egui::Button::new("Next demo")).clicked() {
+                        if let Some((arc_path, entries, idx)) = self.archive_context.clone() {
+                            if idx + 1 < entries.len() {
+                                self.load_archive_demo(ui.ctx(), arc_path, entries, idx + 1, false);
+                            }
+                        } else {
+                            self.update_adjacent_demos();
+                            if let Some(next_path) = self.next_demo.clone() {
+                                self.select_demo(next_path);
+                            }
                         }
                     }
                     let copy_btn_text = if self.copied_demo_feedback.as_ref().map_or(false, |t| t.elapsed().as_secs_f32() < 1.5) {
@@ -3873,6 +4167,30 @@ impl Gui {
                 let width = (right_edge - ui.cursor().min.x).max(50.0);
                 ui.allocate_ui_with_layout(egui::vec2(width, 0.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
                     ui.heading(name);
+                    if let Some((arc_path, entries, idx)) = self.archive_context.clone() {
+                        let arc_name = arc_path
+                            .file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_else(|| arc_path.to_string_lossy().to_string());
+                        ui.label(
+                            egui::RichText::new(format!("({} [{}/{}])", arc_name, idx + 1, entries.len()))
+                                .small()
+                                .weak(),
+                        )
+                        .on_hover_text(format!("{}\nEntry: {}", arc_path.display(), entries[idx].name));
+                        if entries.len() > 1
+                            && ui
+                                .add_enabled(!self.processing, egui::Button::new("Switch demo...").small())
+                                .clicked()
+                        {
+                            self.archive_picker = Some(ArchivePickerState {
+                                archive_path: arc_path,
+                                entries,
+                                selected_index: idx,
+                                auto_analyse: false,
+                            });
+                        }
+                    }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         self.recording_date.show(ui);
                     });
@@ -3886,7 +4204,7 @@ impl Gui {
                 let right_edge = ui.ctx().screen_rect().max.x - 8.0;
                 let width = (right_edge - ui.cursor().min.x).max(50.0);
                 ui.allocate_ui_with_layout(egui::vec2(width, 0.0), egui::Layout::top_down(egui::Align::Center), |ui| {
-                    ui.heading("Drop a .dem file here or click Open...");
+                    ui.heading("Drop a .dem or archive file here or click Open...");
                     if !self.recent_files.is_empty() {
                         ui.add_space(20.0);
                         ui.label(egui::RichText::new("Recent demos").strong());
@@ -4063,7 +4381,7 @@ impl Gui {
             }
             if let Some(path) = recent_to_open {
                 if path.is_file() {
-                    self.select_demo(path);
+                    self.open_path(ctx, path, false);
                 } else {
                     self.recent_files.retain(|p| *p != path);
                     self.analysis_error = Some(format!("{} no longer exists", path.display()));
@@ -4102,12 +4420,12 @@ impl Gui {
 
         if !has_open_subwindow && !self.processing {
             if let Some(path) = ctx.input(|i| i.raw.dropped_files.first().and_then(|f| f.path.clone())) {
-                self.select_demo(path);
-                self.analyse(ctx);
+                self.open_path(ctx, path, true);
             }
         }
 
         self.show_bulk_scan_modal(ctx);
+        self.show_archive_picker_modal(ctx);
 
         if self.show_delete_replays_prompt {
             egui::Window::new("Delete all replays")
@@ -4169,6 +4487,10 @@ including the takes generated for the replays?");
 impl eframe::App for Gui {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.update_ui(ctx);
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.extracted_temp_demo = None;
     }
 }
 
@@ -4294,6 +4616,59 @@ mod tests {
         assert_eq!(new_size, final_size);
 
         let _ = std::fs::remove_file(&temp_file);
+    }
+
+    #[test]
+    fn test_algo_params_default_and_reset() {
+        let mut defaults = Parameters::new();
+        defaults.insert("enabled".to_string(), Parameter::Bool(false));
+        defaults.insert("threshold".to_string(), Parameter::Float(1.5));
+        defaults.insert("min_ticks".to_string(), Parameter::Int(3));
+        defaults.insert("strict".to_string(), Parameter::Bool(true));
+        defaults.insert("recorder_id".to_string(), Parameter::String(String::new()));
+
+        let mut current = defaults.clone();
+        // Differences in "enabled" are ignored when checking or resetting parameter defaults.
+        current.insert("enabled".to_string(), Parameter::Bool(true));
+        assert!(algo_params_are_default(&current, &defaults));
+
+        current.insert("threshold".to_string(), Parameter::Float(2.0));
+        current.insert("min_ticks".to_string(), Parameter::Int(10));
+        current.insert("strict".to_string(), Parameter::Bool(false));
+        current.insert("recorder_id".to_string(), Parameter::String("[U:1:12345]".to_string()));
+        assert!(!algo_params_are_default(&current, &defaults));
+
+        reset_algo_params(&mut current, &defaults);
+        assert!(algo_params_are_default(&current, &defaults));
+        assert!(matches!(current.get("enabled"), Some(Parameter::Bool(true))));
+        assert!(matches!(current.get("threshold"), Some(Parameter::Float(v)) if (*v - 1.5).abs() < f32::EPSILON));
+        assert!(matches!(current.get("min_ticks"), Some(Parameter::Int(3))));
+        assert!(matches!(current.get("strict"), Some(Parameter::Bool(true))));
+        assert!(matches!(current.get("recorder_id"), Some(Parameter::String(s)) if s.is_empty()));
+    }
+
+    #[test]
+    fn test_normalize_algo_param() {
+        assert!(parameter_eq(
+            &normalize_algo_param("recorder_id", Parameter::Int(0)),
+            &Parameter::String(String::new()),
+        ));
+        assert!(parameter_eq(
+            &normalize_algo_param("recorder_id", Parameter::UInt(0)),
+            &Parameter::String(String::new()),
+        ));
+        assert!(parameter_eq(
+            &normalize_algo_param("target_player", Parameter::UInt(76561198000000001)),
+            &Parameter::String("76561198000000001".to_string()),
+        ));
+        assert!(parameter_eq(
+            &normalize_algo_param("target_player", Parameter::Int(42)),
+            &Parameter::String("42".to_string()),
+        ));
+        assert!(parameter_eq(
+            &normalize_algo_param("other_key", Parameter::Int(0)),
+            &Parameter::Int(0),
+        ));
     }
 }
 
